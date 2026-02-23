@@ -47,7 +47,7 @@ const models = new Map();
 let completionRegistered = false;
 let outputRatio = savedState?.outputRatio ?? null;
 let theme = savedState?.theme === "light" ? "light" : "dark";
-const OPENAI_API_KEY = "";
+const OPENAI_API_KEY = "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"; // ВСТАВЬТЕ СЮДА ВАШ КЛЮЧ
 const OPENAI_MODEL = "gpt-5";
 let aiBusy = false;
 
