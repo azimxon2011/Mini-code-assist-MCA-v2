@@ -1,0 +1,5 @@
+google-generativeai
+pywin32
+Pillow
+keyboard
+pyautogui

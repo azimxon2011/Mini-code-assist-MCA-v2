@@ -47,9 +47,11 @@ const models = new Map();
 let completionRegistered = false;
 let outputRatio = savedState?.outputRatio ?? null;
 let theme = savedState?.theme === "light" ? "light" : "dark";
-const OPENAI_API_KEY = "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"; // ВСТАВЬТЕ СЮДА ВАШ КЛЮЧ
-const OPENAI_MODEL = "gpt-5";
+const GEMINI_API_KEY = "AIzaSyDze9Z5aCrxJR9G5YmpcpvNXOOeAgEmK6s"; // ВСТАВЬТЕ СЮДА ВАШ КЛЮЧ
+const GEMINI_MODEL = "gemini-2.5-flash";
 let aiBusy = false;
+let lastPastedImage = null;
+let lastPastedImageTime = 0;
 
 const persistState = () => {
   const payload = {
@@ -65,18 +67,18 @@ const persistState = () => {
 };
 
 const getApiKey = () => {
-  if (OPENAI_API_KEY && OPENAI_API_KEY.includes("sk-")) {
-    return OPENAI_API_KEY;
+  if (GEMINI_API_KEY && GEMINI_API_KEY !== "YOUR_GEMINI_API_KEY") {
+    return GEMINI_API_KEY;
   }
   appendOutput(
-    "Не указан корректный ключ OpenAI в коде (app.js). Найдите константу OPENAI_API_KEY и вставьте свой ключ.\n",
+    "Не указан корректный ключ Gemini в коде (app.js). Найдите константу GEMINI_API_KEY и вставьте свой ключ.\\n",
     true
   );
   return null;
 };
 
 const getModelName = () => {
-  return OPENAI_MODEL;
+  return GEMINI_MODEL;
 };
 
 const blobToDataUrl = (blob) =>
@@ -88,25 +90,72 @@ const blobToDataUrl = (blob) =>
   });
 
 const readClipboardImage = async () => {
+  // Use passively captured image if it's "fresh" (within last 30 seconds)
+  if (lastPastedImage && (Date.now() - lastPastedImageTime < 30000)) {
+    const img = lastPastedImage;
+    lastPastedImage = null;
+    statusRight.textContent = "Ready";
+    statusRight.style.color = "";
+    return img;
+  }
+
+  // Fallback to active read if passive failed or is stale
   if (!navigator.clipboard || !navigator.clipboard.read) {
     return null;
   }
   try {
     const items = await navigator.clipboard.read();
     for (const item of items) {
-      const imageType = item.types.find((type) => type.startsWith("image/"));
-      if (!imageType) {
-        continue;
+      if (item.types.some(type => type.startsWith("image/"))) {
+        const imageType = item.types.find(type => type.startsWith("image/"));
+        const blob = await item.getType(imageType);
+        return await blobToDataUrl(blob);
       }
-      const blob = await item.getType(imageType);
-      const dataUrl = await blobToDataUrl(blob);
-      return dataUrl || null;
     }
-    return null;
-  } catch {
-    return null;
+  } catch (e) {
+    console.warn("Manual clipboard read failed, relying on paste event:", e);
   }
+  return null;
 };
+
+// Use capture phase (true) to catch the event before Monaco handles it
+document.addEventListener("paste", async (event) => {
+  const clipboardData = event.clipboardData || window.clipboardData;
+  if (!clipboardData) return;
+
+  const items = clipboardData.items;
+  let imageFound = false;
+
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].type.startsWith("image/")) {
+      const blob = items[i].getAsFile();
+      if (blob) {
+        try {
+          lastPastedImage = await blobToDataUrl(blob);
+          lastPastedImageTime = Date.now();
+          imageFound = true;
+          statusRight.textContent = "🖼️ Image Ready";
+          statusRight.style.color = "#4caf50";
+          console.log("Image captured");
+        } catch (e) {
+          console.error("Paste capture failed:", e);
+        }
+      }
+    }
+  }
+
+  if (!imageFound && clipboardData.files && clipboardData.files.length > 0) {
+    for (const file of clipboardData.files) {
+      if (file.type.startsWith("image/")) {
+        lastPastedImage = await blobToDataUrl(file);
+        lastPastedImageTime = Date.now();
+        imageFound = true;
+        statusRight.textContent = "🖼️ Image Ready";
+        statusRight.style.color = "#4caf50";
+      }
+    }
+  }
+}, true);
 
 const getEditorContext = () => {
   if (!editor) {
@@ -124,7 +173,7 @@ const getEditorContext = () => {
   const context = model.getValueInRange(range);
   const selectionText =
     selection && !selection.isEmpty() ? model.getValueInRange(selection) : "";
-  
+
   // Get text before cursor on the current line to help AI with corrections
   const lineContent = model.getLineContent(position.lineNumber);
   const lineContentBeforeCursor = lineContent.substring(0, position.column - 1);
@@ -142,9 +191,10 @@ const extractOutputText = (data) => {
   if (!data) {
     return "";
   }
-  // OpenAI standard format
-  if (data.choices && data.choices[0] && data.choices[0].message) {
-    return data.choices[0].message.content || "";
+  // Gemini response format
+  if (data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts) {
+    // Filter for text parts
+    return data.candidates[0].content.parts.map(p => p.text || "").join("");
   }
   return "";
 };
@@ -155,7 +205,7 @@ const sanitizeInsertText = (text) => {
   }
   // Do not trim immediately, as indentation matters!
   let cleaned = text;
-  
+
   // Remove Markdown code blocks if present
   if (cleaned.trim().startsWith("```")) {
     const lines = cleaned.split("\n");
@@ -169,7 +219,7 @@ const sanitizeInsertText = (text) => {
     }
     cleaned = lines.join("\n");
   }
-  
+
   // Do NOT trim start/end whitespace generically, 
   // because we need to match the user's existing indentation/prefix.
   return cleaned;
@@ -181,15 +231,16 @@ const requestAiAssist = async ({ code, context, line, column, selectionText, ima
     return "";
   }
   const model = getModelName();
-  const systemText =
-    "You are an expert coding assistant. You write code like a human developer.\n" +
-    "Rules:\n" +
-    "1. Receive the code context, cursor position, and optional image.\n" +
-    "2. Your task is to generate the **CORRECTED** or **COMPLETED** code that should appear at the cursor position.\n" +
-    "3. **CRITICAL**: The user might have started typing a line (provided in <line_prefix>). Your response MUST START with that prefix (or a corrected version of it) and then continue.\n" +
-    "4. Return ONLY the code string. Do NOT use '\\b'. Do NOT add markdown formatting.\n" +
-    "5. PREFER CONCISE CODE. For simple tasks, write short, readable solutions.\n" +
-    "6. If the prefix is '    def m', your output should be '    def main():' (preserving indent).";
+  const systemInstruction =
+    "Ты — ученик 8-го класса на олимпиаде по программированию. Тебе лень, ты пишешь просто и быстро.\n" +
+    "Твои правила:\n" +
+    "1. Пиши простой код, как восьмиклассник. Не парься над оптимизацией.\n" +
+    "2. Если есть повторяющийся код — просто копируй и вставляй его, не делай лишних циклов или функций, если лень.\n" +
+    "3. Используй простые имена переменных: a, b, x, y, s, res, cnt.\n" +
+    "4. Не добавляй лишних импортов.\n" +
+    "5. Твой ответ ДОЛЖЕН НАЧИНАТЬСЯ с того, что передано в <line_prefix>, и продолжать код.\n" +
+    "6. Возвращай ТОЛЬКО код. Без markdown, без лишних пояснений.\n" +
+    "7. Если в префиксе '    def m', твой ответ должен быть '    def main():' (соблюдай отступ).";
 
   const userText = [
     `<context>`,
@@ -206,23 +257,35 @@ const requestAiAssist = async ({ code, context, line, column, selectionText, ima
     "Instruction: Generate the code starting from the beginning of the current line (matching <line_prefix> or correcting it).",
   ].join("\n");
 
-  const userContent = [{ type: "text", text: userText }];
+  const contents = [{
+    role: "user",
+    parts: [{ text: userText }]
+  }];
+
   if (imageDataUrl) {
-    userContent.push({ type: "image_url", image_url: { url: imageDataUrl } });
+    const base64Data = imageDataUrl.split(",")[1];
+    const mimeType = imageDataUrl.split(";")[0].split(":")[1];
+    contents[0].parts.push({
+      inline_data: {
+        mime_type: mimeType,
+        data: base64Data
+      }
+    });
   }
 
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model,
-      messages: [
-        { role: "system", content: systemText },
-        { role: "user", content: userContent },
-      ],
+      system_instruction: {
+        parts: [{ text: systemInstruction }]
+      },
+      contents: contents,
+      generationConfig: {
+        temperature: 0.2, // Lower temperature for more deterministic code completion
+      }
     }),
   });
 
@@ -243,7 +306,7 @@ const typeLikeHuman = (text) =>
     }
     editor.focus();
     let index = 0;
-    
+
     // Handle selection replacement first if needed, 
     // but here we assume the AI handles 'deletion' via \b or user handles selection.
     // However, if there IS a selection and the AI just starts typing, usually in editors it overwrites.
@@ -272,13 +335,13 @@ const typeLikeHuman = (text) =>
       // Ensure we don't split a \b sequence
       let chunk = text.slice(index, index + nextSize);
       if (chunk.endsWith("\\")) {
-         chunk = text.slice(index, index + 1);
+        chunk = text.slice(index, index + 1);
       }
-      
+
       // If we are about to hit a \b, stop just before it
       const nextBackslash = text.indexOf("\\b", index);
       if (nextBackslash !== -1 && nextBackslash < index + chunk.length) {
-          chunk = text.slice(index, nextBackslash);
+        chunk = text.slice(index, nextBackslash);
       }
 
       if (chunk.length > 0) {
@@ -312,14 +375,14 @@ const calculateDiffAndTypingSequence = (currentPrefix, aiSuggestion) => {
   // However, we must be careful: if AI returns "print(a)", and user has "print(",
   // common is "print(". AI suggestion "print(a)" starts with "print(".
   // We assume AI suggestion *starts* with the corrected version of the prefix IF it's correcting.
-  
+
   // Heuristic:
   // If aiSuggestion starts with currentPrefix, it's a pure addition.
   // If not, it's a correction.
-  
+
   const deleteCount = currentPrefix.length - commonLen;
   const toType = aiSuggestion.substring(commonLen);
-  
+
   let sequence = "";
   for (let i = 0; i < deleteCount; i++) {
     sequence += "\\b";
@@ -351,10 +414,10 @@ const handleAiHotkey = async (event) => {
       imageDataUrl,
       lineContentBeforeCursor,
     });
-    
+
     // Calculate typing sequence (diff)
     const typingSequence = calculateDiffAndTypingSequence(lineContentBeforeCursor, aiCode);
-    
+
     await typeLikeHuman(typingSequence);
     status.textContent = "AI ready";
     statusRight.textContent = "Ready";
