@@ -53,6 +53,12 @@ let aiBusy = false;
 let lastPastedImage = null;
 let lastPastedImageTime = 0;
 
+// Hacker Typing State
+let codeBuffer = "";
+let codeIndex = 0;
+let isTypingMode = false;
+let isEditMode = false;
+
 const persistState = () => {
   const payload = {
     files,
@@ -116,6 +122,38 @@ const readClipboardImage = async () => {
     console.warn("Manual clipboard read failed, relying on paste event:", e);
   }
   return null;
+};
+
+const adjustForAutoindent = (code) => {
+  const lines = code.split("\n");
+  const result = [];
+  let editorIndent = 0;
+
+  for (const line of lines) {
+    if (!line.trim()) {
+      result.push("");
+      continue;
+    }
+
+    const originalIndent = line.length - line.trimStart().length;
+    const content = line.trimStart();
+
+    if (originalIndent < editorIndent) {
+      const outdentLevels = Math.floor((editorIndent - originalIndent) / 4);
+      result.push("\b".repeat(outdentLevels) + content);
+    } else {
+      const extraSpaces = originalIndent - editorIndent;
+      result.push(" ".repeat(extraSpaces) + content);
+    }
+
+    if (content.trimEnd().endsWith(":")) {
+      editorIndent = originalIndent + 4;
+    } else {
+      editorIndent = originalIndent;
+    }
+  }
+
+  return result.join("\n");
 };
 
 // Use capture phase (true) to catch the event before Monaco handles it
@@ -203,25 +241,20 @@ const sanitizeInsertText = (text) => {
   if (!text) {
     return "";
   }
-  // Do not trim immediately, as indentation matters!
   let cleaned = text;
 
   // Remove Markdown code blocks if present
   if (cleaned.trim().startsWith("```")) {
     const lines = cleaned.split("\n");
-    // Remove first line if it's ```python etc
     if (lines[0].trim().startsWith("```")) {
       lines.shift();
     }
-    // Remove last line if it's ```
     if (lines.length > 0 && lines[lines.length - 1].trim().startsWith("```")) {
       lines.pop();
     }
     cleaned = lines.join("\n");
   }
 
-  // Do NOT trim start/end whitespace generically, 
-  // because we need to match the user's existing indentation/prefix.
   return cleaned;
 };
 
@@ -232,15 +265,15 @@ const requestAiAssist = async ({ code, context, line, column, selectionText, ima
   }
   const model = getModelName();
   const systemInstruction =
-    "Ты — ученик 8-го класса на олимпиаде по программированию. Тебе лень, ты пишешь просто и быстро.\n" +
-    "Твои правила:\n" +
-    "1. Пиши простой код, как восьмиклассник. Не парься над оптимизацией.\n" +
-    "2. Если есть повторяющийся код — просто копируй и вставляй его, не делай лишних циклов или функций, если лень.\n" +
-    "3. Используй простые имена переменных: a, b, x, y, s, res, cnt.\n" +
-    "4. Не добавляй лишних импортов.\n" +
-    "5. Твой ответ ДОЛЖЕН НАЧИНАТЬСЯ с того, что передано в <line_prefix>, и продолжать код.\n" +
-    "6. Возвращай ТОЛЬКО код. Без markdown, без лишних пояснений.\n" +
-    "7. Если в префиксе '    def m', твой ответ должен быть '    def main():' (соблюдай отступ).";
+    "You are an 8th-grade student participating in a programming olympiad.\n" +
+    "Your rules:\n" +
+    "1. Write very COMPACT and simple competitive-programming code. Solve the problem EXACTLY.\n" +
+    "2. NO Object-Oriented Programming (no classes). NO imports.\n" +
+    "3. Use One symbol or UZBEK ULTRAMINIMALISTIC variable(or function) names. Keep loop variables as 'i', 'j', 'n'.\n" +
+    "4. Do NOT leave blank lines between logic blocks unless absolutely necessary. Keep the code vertically compact.\n" +
+    "5. CRITICAL: DO NOT MANUALLY UNROLL LOOPS. If you need to check 5 elements, use a `for i in range(5):` loop. Never write 5 separate `if` statements for the same logic.\n" +
+    "6. Return ONLY the code. No markdown code blocks (no ```python), no explanations, no comments.\n" +
+    "7. DEDUCTION RULE: If you need to un-indent/go back one level (e.g., after a loop or an if-block ends) back to the left, output exactly ONE '\\x08' (backspace) character without spaces before it. DO NOT USE THIS RULE unless you need to break out of a block.";
 
   const userText = [
     `<context>`,
@@ -297,100 +330,6 @@ const requestAiAssist = async ({ code, context, line, column, selectionText, ima
   const data = await response.json();
   return sanitizeInsertText(extractOutputText(data));
 };
-
-const typeLikeHuman = (text) =>
-  new Promise((resolve) => {
-    if (!editor || !text) {
-      resolve();
-      return;
-    }
-    editor.focus();
-    let index = 0;
-
-    // Handle selection replacement first if needed, 
-    // but here we assume the AI handles 'deletion' via \b or user handles selection.
-    // However, if there IS a selection and the AI just starts typing, usually in editors it overwrites.
-    // Let's rely on standard editor behavior for typing: if selection exists, typing replaces it.
-    // But for \b, we need special handling.
-
-    const step = () => {
-      if (!editor) {
-        resolve();
-        return;
-      }
-      if (index >= text.length) {
-        resolve();
-        return;
-      }
-
-      // Check for backspace simulation
-      if (text.substring(index, index + 2) === "\\b") {
-        editor.trigger("ai", "deleteLeft", {});
-        index += 2;
-        setTimeout(step, 50 + Math.random() * 50);
-        return;
-      }
-
-      const nextSize = Math.random() < 0.2 ? 2 : 1;
-      // Ensure we don't split a \b sequence
-      let chunk = text.slice(index, index + nextSize);
-      if (chunk.endsWith("\\")) {
-        chunk = text.slice(index, index + 1);
-      }
-
-      // If we are about to hit a \b, stop just before it
-      const nextBackslash = text.indexOf("\\b", index);
-      if (nextBackslash !== -1 && nextBackslash < index + chunk.length) {
-        chunk = text.slice(index, nextBackslash);
-      }
-
-      if (chunk.length > 0) {
-        editor.trigger("ai", "type", { text: chunk });
-        index += chunk.length;
-      } else {
-        // We might be at a \b boundary handled next loop
-      }
-
-      const delay = 20 + Math.random() * 50; // Variable speed
-      setTimeout(step, delay);
-    };
-    step();
-  });
-
-const calculateDiffAndTypingSequence = (currentPrefix, aiSuggestion) => {
-  // 1. Find common prefix length
-  let commonLen = 0;
-  const minLen = Math.min(currentPrefix.length, aiSuggestion.length);
-  for (let i = 0; i < minLen; i++) {
-    if (currentPrefix[i] === aiSuggestion[i]) {
-      commonLen++;
-    } else {
-      break;
-    }
-  }
-
-  // 2. Calculate characters to delete (backspaces)
-  // If AI suggests "print" and user has "prnit", common is "pr".
-  // User needs to delete "nit" (3 chars) and type "int".
-  // However, we must be careful: if AI returns "print(a)", and user has "print(",
-  // common is "print(". AI suggestion "print(a)" starts with "print(".
-  // We assume AI suggestion *starts* with the corrected version of the prefix IF it's correcting.
-
-  // Heuristic:
-  // If aiSuggestion starts with currentPrefix, it's a pure addition.
-  // If not, it's a correction.
-
-  const deleteCount = currentPrefix.length - commonLen;
-  const toType = aiSuggestion.substring(commonLen);
-
-  let sequence = "";
-  for (let i = 0; i < deleteCount; i++) {
-    sequence += "\\b";
-  }
-  sequence += toType;
-  return sequence;
-};
-
 const handleAiHotkey = async (event) => {
   if (event.code !== "ShiftRight" || event.repeat) {
     return;
@@ -399,13 +338,15 @@ const handleAiHotkey = async (event) => {
     return;
   }
   aiBusy = true;
-  status.textContent = "AI thinking...";
+  status.textContent = "Taking screenshot...";
   statusRight.textContent = "AI";
   try {
     const code = editor.getValue();
     const { context, line, column, selectionText, lineContentBeforeCursor } = getEditorContext();
     const imageDataUrl = await readClipboardImage();
-    const aiCode = await requestAiAssist({
+
+    status.textContent = "AI thinking...";
+    const rawAiCode = await requestAiAssist({
       code,
       context,
       line,
@@ -415,17 +356,84 @@ const handleAiHotkey = async (event) => {
       lineContentBeforeCursor,
     });
 
-    // Calculate typing sequence (diff)
-    const typingSequence = calculateDiffAndTypingSequence(lineContentBeforeCursor, aiCode);
+    if (!rawAiCode) {
+      status.textContent = "AI returned nothing";
+      return;
+    }
 
-    await typeLikeHuman(typingSequence);
-    status.textContent = "AI ready";
-    statusRight.textContent = "Ready";
-  } catch {
+    codeBuffer = adjustForAutoindent(rawAiCode);
+    codeIndex = 0;
+    isTypingMode = true;
+    isEditMode = false;
+
+    status.textContent = `Ready! ${codeBuffer.length} chars. Switch to editor, press ANY key.`;
+    console.log("AI code ready for manual typing");
+  } catch (e) {
+    console.error("AI Assist failed:", e);
     status.textContent = "AI failed";
     statusRight.textContent = "Error";
   } finally {
     aiBusy = false;
+  }
+};
+
+const handleKeyPress = async (event) => {
+  // 1. ShiftRight triggers capture
+  if (event.code === "ShiftRight" && !event.repeat) {
+    handleAiHotkey(event);
+    return;
+  }
+
+  // 2. Typing mode logic
+  if (isTypingMode) {
+    // F8 toggles Edit Mode
+    if (event.code === "F8") {
+      event.preventDefault();
+      isEditMode = !isEditMode;
+      status.textContent = isEditMode ? "Edit Mode: ON" : "Edit Mode: OFF (Code typing resumed)";
+      return;
+    }
+
+    if (isEditMode) return;
+
+    // ESC cancels
+    if (event.code === "Escape") {
+      isTypingMode = false;
+      status.textContent = "Typing cancelled.";
+      return;
+    }
+
+    // Backspace undo
+    if (event.code === "Backspace") {
+      event.preventDefault();
+      if (codeIndex > 0) {
+        codeIndex--;
+        editor.trigger("ai", "deleteLeft", {});
+      }
+      return;
+    }
+
+    // Intercept ANY other key to type next char
+    // Ignore modifier keys alone
+    if (["Control", "Shift", "Alt", "Meta", "NumLock", "CapsLock"].includes(event.key)) {
+      return;
+    }
+
+    event.preventDefault();
+    if (codeIndex >= codeBuffer.length) {
+      isTypingMode = false;
+      status.textContent = "All code typed!";
+      return;
+    }
+
+    const ch = codeBuffer[codeIndex];
+    codeIndex++;
+
+    if (ch === "\b") {
+      editor.trigger("ai", "deleteLeft", {});
+    } else {
+      editor.trigger("ai", "type", { text: ch });
+    }
   }
 };
 
@@ -980,4 +988,4 @@ window.require(["vs/editor/editor.main"], () => {
 
 initPyodide();
 
-window.addEventListener("keydown", handleAiHotkey);
+window.addEventListener("keydown", handleKeyPress, true);

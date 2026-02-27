@@ -12,6 +12,8 @@ from PIL import ImageGrab
 # --- CONFIGURATION ---
 GEMINI_API_KEY = "AIzaSyDze9Z5aCrxJR9G5YmpcpvNXOOeAgEmK6s"
 GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_PRO_MODEL = "gemini-3.1-pro-preview"
+
 
 genai.configure(api_key=GEMINI_API_KEY)
 
@@ -20,7 +22,7 @@ SYSTEM_INSTRUCTION = (
     "Your rules:\n"
     "1. Write very COMPACT and simple competitive-programming code. Solve the problem EXACTLY.\n"
     "2. NO Object-Oriented Programming (no classes). NO imports.\n"
-    "3. Use SHORT, meaningful UZBEK variable names (e.g., 'javob', 'massiv', 'son'). Keep loop variables as 'i', 'j', 'n'.\n"
+    "3. Use One symbol or UZBEK ULTRAMINIMALISTIC variable(or function) names. Keep loop variables as 'i', 'j', 'n'.\n"
     "4. Do NOT leave blank lines between logic blocks unless absolutely necessary. Keep the code vertically compact.\n"
     "5. CRITICAL: DO NOT MANUALLY UNROLL LOOPS. If you need to check 5 elements, use a `for i in range(5):` loop. Never write 5 separate `if` statements for the same logic.\n"
     "6. Return ONLY the code. No markdown code blocks (no ```python), no explanations, no comments.\n"
@@ -113,9 +115,9 @@ def adjust_for_autoindent(code):
     return '\n'.join(result)
 
 
-def generate_code(image_bytes):
+def generate_code(image_bytes, model_name=GEMINI_MODEL):
     model = genai.GenerativeModel(
-        model_name=GEMINI_MODEL,
+        model_name=model_name,
         system_instruction=SYSTEM_INSTRUCTION
     )
     img_part = {
@@ -212,11 +214,13 @@ def on_typing_key(event):
             typing_queue.put('\x08')
         return False
 
-    # RightShift re-captures new image
+    # RightShift or Ctrl+RightShift re-captures
+    is_ctrl = keyboard.is_pressed('ctrl') or keyboard.is_pressed('left ctrl') or keyboard.is_pressed('right ctrl')
     if event.name in ('right shift', 'rightshift') or event.scan_code == 54:
         if is_down:
-            stop_typing_mode("RightShift pressed — restarting capture.")
-            threading.Thread(target=capture_and_generate, daemon=True).start()
+            model_to_use = GEMINI_PRO_MODEL if is_ctrl else GEMINI_MODEL
+            stop_typing_mode(f"Hotkey pressed — restarting capture ({model_to_use}).")
+            threading.Thread(target=capture_and_generate, args=(model_to_use,), daemon=True).start()
         return False
 
     # Only type on key down (ignore key up events, but still suppress them)
@@ -236,7 +240,7 @@ def on_typing_key(event):
     return False  # suppress original keypress
 
 
-def capture_and_generate():
+def capture_and_generate(model_name=GEMINI_MODEL):
     global code_buffer, code_index, typing_mode, busy, edit_mode
 
     with state_lock:
@@ -254,8 +258,8 @@ def capture_and_generate():
             log("Failed to take screenshot!", "WARN")
             return
 
-        log(f"Screenshot taken ({len(image_bytes)} bytes). Asking Gemini...")
-        code = generate_code(image_bytes)
+        log(f"Screenshot taken ({len(image_bytes)} bytes). Asking Gemini ({model_name})...")
+        code = generate_code(image_bytes, model_name=model_name)
 
         if not code:
             log("Gemini returned nothing.", "WARN")
@@ -284,14 +288,17 @@ def on_press_global(event):
     """Passive listener — triggers capture on RightShift."""
     if event.event_type != keyboard.KEY_DOWN:
         return
+    is_ctrl = keyboard.is_pressed('ctrl') or keyboard.is_pressed('left ctrl') or keyboard.is_pressed('right ctrl')
     if event.name in ('right shift', 'rightshift') or event.scan_code == 54:
         if not typing_mode:
-            threading.Thread(target=capture_and_generate, daemon=True).start()
+            model_to_use = GEMINI_PRO_MODEL if is_ctrl else GEMINI_MODEL
+            threading.Thread(target=capture_and_generate, args=(model_to_use,), daemon=True).start()
 
 
 def main():
     log("=== Hacker Typing Assistant ===")
-    log("RightShift = capture screenshot + generate code")
+    log("RightShift      = capture screenshot + generate code (Flash)")
+    log("Ctrl+RightShift = capture screenshot + generate code (Smart/Pro)")
     log("Any key    = type next code char (in typing mode)")
     log("ESC        = cancel typing mode")
     log("Ctrl+C     = exit")
