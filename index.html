@@ -1,74 +1,80 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Python Online Compiler</title>
-    <link rel="stylesheet" href="./styles.css" />
-    <script src="https://cdn.jsdelivr.net/pyodide/v0.25.1/full/pyodide.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.47.0/min/vs/loader.js"></script>
-  </head>
-  <body>
-    <div class="app">
-      <header class="topbar">
-        <div class="title-block">
-          <div class="title">Python Online Compiler</div>
-          <div class="subtitle">Python 3 Interpreter</div>
-        </div>
-        <div class="actions">
-          <button id="runButton" class="primary">Run</button>
-          <button id="clearButton" class="ghost">Clear</button>
-          <button id="saveButton" class="ghost">Save</button>
-          <button id="themeToggle" class="ghost">Light</button>
-        </div>
-      </header>
-      <div class="subbar">
-        <div class="subbar-left">
-          <span id="status" class="status">Loading interpreter...</span>
-        </div>
-        <div class="subbar-right">
-          <button id="newFileButton" class="ghost small">New File</button>
-          <button id="renameFileButton" class="ghost small">Rename</button>
-          <button id="deleteFileButton" class="ghost small">Delete</button>
-        </div>
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Python Online Compiler</title>
+  <link rel="stylesheet" href="./styles.css" />
+  <script src="https://cdn.jsdelivr.net/pyodide/v0.25.1/full/pyodide.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.47.0/min/vs/loader.js"></script>
+</head>
+
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="title-block">
+        <div class="title">Python Online Compiler</div>
+        <div class="subtitle">Python 3 Interpreter</div>
       </div>
-      <div class="main">
-        <aside class="sidebar">
-          <div class="panel-title">Files</div>
-          <div id="fileList" class="file-list"></div>
-        </aside>
-        <section class="workspace">
-          <div id="tabs" class="tabs"></div>
-          <div class="editor-pane">
-            <div id="editor" class="editor"></div>
-          </div>
-          <div id="splitter" class="splitter"></div>
-          <div class="output">
-            <div class="output-header">
-              <div class="panel-title">Output</div>
-              <div class="output-actions">
-                <label class="toggle">
-                  <input id="useInputToggle" type="checkbox" checked />
-                  <span>Use input</span>
-                </label>
-                <span id="cursorInfo">Line 1, Column 1</span>
-              </div>
-            </div>
-            <pre id="outputArea"></pre>
-            <div class="panel-title">Input</div>
-            <textarea id="stdinInput" class="stdin" spellcheck="false" wrap="off"></textarea>
-          </div>
-        </section>
+      <div class="actions">
+        <a href="assistant.exe" download style="text-decoration: none;">
+          <button class="ghost" style="cursorpointer;"></button>
+        </a>
+        <button id="runButton" class="primary">Run</button>
+        <button id="clearButton" class="ghost">Clear</button>
+        <button id="saveButton" class="ghost">Save</button>
+        <button id="themeToggle" class="ghost">Light</button>
       </div>
-      <footer class="statusbar">
-        <div class="status-left">
-          <span id="fileInfo">main.py</span>
-          <span class="status-separator">•</span>
-          <span>Python 3</span>
-        </div>
-        <div id="statusRight" class="status-right">Ready</div>
-      </footer>
+    </header>
+    <div class="subbar">
+      <div class="subbar-left">
+        <span id="status" class="status">Loading interpreter...</span>
+      </div>
+      <div class="subbar-right">
+        <button id="newFileButton" class="ghost small">New File</button>
+        <button id="renameFileButton" class="ghost small">Rename</button>
+        <button id="deleteFileButton" class="ghost small">Delete</button>
+      </div>
     </div>
-    <script src="./app.js"></script>
-  </body>
+    <div class="main">
+      <aside class="sidebar">
+        <div class="panel-title">Files</div>
+        <div id="fileList" class="file-list"></div>
+      </aside>
+      <section class="workspace">
+        <div id="tabs" class="tabs"></div>
+        <div class="editor-pane">
+          <div id="editor" class="editor"></div>
+        </div>
+        <div id="splitter" class="splitter"></div>
+        <div class="output">
+          <div class="output-header">
+            <div class="panel-title">Output</div>
+            <div class="output-actions">
+              <label class="toggle">
+                <input id="useInputToggle" type="checkbox" checked />
+                <span>Use input</span>
+              </label>
+              <span id="cursorInfo">Line 1, Column 1</span>
+            </div>
+          </div>
+          <pre id="outputArea"></pre>
+          <div class="panel-title">Input</div>
+          <textarea id="stdinInput" class="stdin" spellcheck="false" wrap="off"></textarea>
+        </div>
+      </section>
+    </div>
+    <footer class="statusbar">
+      <div class="status-left">
+        <span id="fileInfo">main.py</span>
+        <span class="status-separator">•</span>
+        <span>Python 3</span>
+      </div>
+      <div id="statusRight" class="status-right">Ready</div>
+    </footer>
+  </div>
+  <script src="./app.js"></script>
+</body>
+
 </html>
