@@ -18,7 +18,6 @@ GEMINI_PRO_MODEL = "gemini-3.1-pro-preview"
 genai.configure(api_key=GEMINI_API_KEY)
 
 SYSTEM_INSTRUCTION = (
-    "You are an 8th-grade student participating in a olympiad.\n"
     "Answer with only the final result. Do not include explanations, words, punctuation, or formatting."
 )
 
