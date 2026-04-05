@@ -11,19 +11,52 @@ import win32api
 import win32con
 import google.generativeai as genai
 from PIL import ImageGrab
+import tkinter as tk
+from tkinter import ttk, messagebox
 
-# --- CONFIGURATION ---
-GEMINI_API_KEY = "AIzaSyDze9Z5aCrxJR9G5YmpcpvNXOOeAgEmK6s"
-MODEL_FLASH = "gemini-3.1-flash-lite-preview"
-MODEL_PRO = "gemini-3.1-pro-preview"
-MODEL_SOLVER = "gemini-3-flash-preview"
+# --- STATE ---
+class AssistantState:
+    def __init__(self):
+        self.mode = "SOLVER"  # "SOLVER" or "TYPER"
+        self.busy = False
+        self.lock = threading.Lock()
+        
+        # Configurable Settings
+        self.api_key = "AIzaSyDze9Z5aCrxJR9G5YmpcpvNXOOeAgEmK6s"
+        self.model_flash = "gemini-3.1-flash-lite-preview"
+        self.model_pro = "gemini-3.1-pro-preview"
+        self.model_solver = "gemini-3-flash-preview"
+        self.system_instr_typer = "Answer with only the final result. Do not include explanations, words, punctuation, or formatting."
+        self.system_instr_solver = (
+            "You are an Elite Solver. Solve the Math/Physics/English question in the image. "
+            "Reason internally but Output ONLY the uppercase letter (A, B, C, or D). "
+            "No text, no explanation. If there is answer marked already recheck it and output right answer."
+        )
+        
+        # Typer Specific
+        self.code_buffer = ""
+        self.code_index = 0
+        self.typing_active = False
+        self.edit_mode = False
+        self.typing_hook = None
+        
+        # Solver Specific
+        self.last_img_hash = None
+        self.last_letter = "?"
+        
+        # Global
+        self.loading_event = threading.Event()
+        self.menu_open = False
 
-# Virtual Key Codes
+state = AssistantState()
+
+# Initialize GenAI with default key
+genai.configure(api_key=state.api_key)
+
+# --- VIRTUAL KEYS ---
 VK_NUM = 0x90
 VK_CAPS = 0x14
 VK_SCROLL = 0x91
-
-genai.configure(api_key=GEMINI_API_KEY)
 
 # --- SYSTEM PROMPTS ---
 TYPER_INSTRUCTION = (
@@ -44,29 +77,6 @@ INDICATOR_MAP = {
     "D": (True,  True,  True),
     "?": (False, False, False),
 }
-
-# --- STATE ---
-class AssistantState:
-    def __init__(self):
-        self.mode = "SOLVER"  # "SOLVER" or "TYPER"
-        self.busy = False
-        self.lock = threading.Lock()
-        
-        # Typer Specific
-        self.code_buffer = ""
-        self.code_index = 0
-        self.typing_active = False
-        self.edit_mode = False
-        self.typing_hook = None
-        
-        # Solver Specific
-        self.last_img_hash = None
-        self.last_letter = "?"
-        
-        # Global
-        self.loading_event = threading.Event()
-
-state = AssistantState()
 
 # --- UTILITIES ---
 def log(msg, level="INFO"):
@@ -94,18 +104,15 @@ def loading_heartbeat():
     """Blinks indicators while loading_event is set."""
     while state.loading_event.is_set():
         if state.mode == "SOLVER":
-            # Solver indicator: NumLock
             set_leds(num=True)
             time.sleep(0.3)
             set_leds(num=False)
             time.sleep(0.3)
         else:
-            # Typer indicator: NumLock + ScrollLock
             set_leds(num=True, scroll=True)
             time.sleep(0.3)
             set_leds(num=False, scroll=False)
             time.sleep(0.3)
-    # Ensure off when done
     set_leds(num=False, scroll=False)
 
 def get_screenshot():
@@ -154,6 +161,60 @@ def adjust_for_autoindent(code):
             editor_indent = original_indent
     return '\n'.join(result)
 
+# --- SETTINGS MENU (TKINTER) ---
+def open_settings_menu():
+    if state.menu_open: return
+    state.menu_open = True
+    
+    root = tk.Tk()
+    root.title("Settings")
+    root.geometry("400x450")
+    root.attributes('-topmost', True)
+    
+    main_frame = ttk.Frame(root, padding=10)
+    main_frame.pack(fill=tk.BOTH, expand=True)
+
+    def add_entry(label, var_name, is_text=False):
+        ttk.Label(main_frame, text=label).pack(anchor=tk.W)
+        if is_text:
+            widget = tk.Text(main_frame, height=4, width=40, font=("Consolas", 9))
+            widget.insert("1.0", getattr(state, var_name))
+            widget.pack(fill=tk.X, pady=(0, 10))
+            return widget
+        else:
+            widget = ttk.Entry(main_frame, width=40)
+            widget.insert(0, getattr(state, var_name))
+            widget.pack(fill=tk.X, pady=(0, 10))
+            return widget
+
+    key_e = add_entry("API Key", "api_key")
+    flash_e = add_entry("Flash Model", "model_flash")
+    pro_e = add_entry("Pro Model", "model_pro")
+    solve_model_e = add_entry("Solver Model", "model_solver")
+    typer_i = add_entry("Typer Instr", "system_instr_typer", True)
+    solver_i = add_entry("Solver Instr", "system_instr_solver", True)
+
+    def on_apply():
+        with state.lock:
+            state.api_key = key_e.get().strip()
+            state.model_flash = flash_e.get().strip()
+            state.model_pro = pro_e.get().strip()
+            state.model_solver = solve_model_e.get().strip()
+            state.system_instr_typer = typer_i.get("1.0", tk.END).strip()
+            state.system_instr_solver = solver_i.get("1.0", tk.END).strip()
+            genai.configure(api_key=state.api_key)
+        log("Applied.")
+        root.destroy()
+        state.menu_open = False
+
+    ttk.Button(main_frame, text="Apply", command=on_apply).pack(pady=5)
+
+    def on_close():
+        state.menu_open = False
+        root.destroy()
+    root.protocol("WM_DELETE_WINDOW", on_close)
+    root.mainloop()
+
 # --- TYPER LOGIC ---
 def type_one_char(ch):
     if ch == '\n': keyboard.press_and_release('enter')
@@ -192,11 +253,15 @@ def on_typing_key(event):
             typing_queue.put('\x08')
         return False
     
-    # Check for mode switch or recapture while in typing mode
-    if event.name == 'f9' and is_down:
-        stop_typing_mode("Mode switch requested.")
-        toggle_mode()
-        return False
+    # Check for mode switch or settings while in typing mode
+    if is_down:
+        if event.name == 'f9':
+            stop_typing_mode("Mode switch requested.")
+            toggle_mode()
+            return False
+        if event.name == 'i' and (keyboard.is_pressed('ctrl') or keyboard.is_pressed('left ctrl')):
+            threading.Thread(target=open_settings_menu, daemon=True).start()
+            return False
 
     if is_down:
         with state.lock:
@@ -222,10 +287,14 @@ def stop_typing_mode(reason=""):
     if reason: log(reason)
 
 # --- ACTION HANDLERS ---
-def handle_typer_action(model_name=MODEL_FLASH):
+def handle_typer_action(model_name=None):
     with state.lock:
         if state.busy: return
         state.busy = True
+        if model_name is None:
+            # Determine based on Ctrl mod used at trigger time
+            is_ctrl = keyboard.is_pressed('ctrl') or keyboard.is_pressed('left ctrl')
+            model_name = state.model_pro if is_ctrl else state.model_flash
     
     try:
         state.loading_event.set()
@@ -235,7 +304,7 @@ def handle_typer_action(model_name=MODEL_FLASH):
         if img:
             img_data = img_to_bytes(img)
             log(f"Typing: Capture taken. Asking Gemini ({model_name})...")
-            gen_model = genai.GenerativeModel(model_name=model_name, system_instruction=TYPER_INSTRUCTION)
+            gen_model = genai.GenerativeModel(model_name=model_name, system_instruction=state.system_instr_typer)
             response = gen_model.generate_content([
                 "Return code/text for this image.", 
                 {"inline_data": {"mime_type": "image/png", "data": base64.b64encode(img_data).decode()}}
@@ -258,12 +327,12 @@ def handle_solver_action():
     with state.lock:
         if state.busy: return
         state.busy = True
+        model_name = state.model_solver
     
     try:
         img = get_screenshot()
         if not img: return
         
-        # Hash check to avoid duplicate work if held down
         img_bytes = img_to_bytes(img)
         curr_hash = hashlib.sha256(img_bytes).hexdigest()
         if curr_hash == state.last_img_hash:
@@ -276,8 +345,8 @@ def handle_solver_action():
         state.loading_event.set()
         threading.Thread(target=loading_heartbeat, daemon=True).start()
         
-        log("Solver: Analyzing question...")
-        gen_model = genai.GenerativeModel(model_name=MODEL_SOLVER, system_instruction=SOLVER_INSTRUCTION)
+        log(f"Solver: Analyzing... ({model_name})")
+        gen_model = genai.GenerativeModel(model_name=model_name, system_instruction=state.system_instr_solver)
         response = gen_model.generate_content([
             "Solve this question (A/B/C/D).",
             {"inline_data": {"mime_type": "image/png", "data": base64.b64encode(img_bytes).decode()}}
@@ -305,7 +374,6 @@ def toggle_mode():
         else:
             state.mode = "SOLVER"
         log(f"MODE SWITCHED: Now in {state.mode} mode.")
-    # Blink both as feedback
     set_leds(True, True, True)
     time.sleep(0.2)
     set_leds(False, False, False)
@@ -318,16 +386,19 @@ def on_global_hotkey(event):
         toggle_mode()
         return
 
+    # Settings Menu (Ctrl + i)
+    if event.name == 'i' and (keyboard.is_pressed('ctrl') or keyboard.is_pressed('left ctrl')):
+        threading.Thread(target=open_settings_menu, daemon=True).start()
+        return
+
     # Trigger (Right Shift)
     is_rshift = (event.name in ('right shift', 'rightshift') or event.scan_code == 54)
     if is_rshift:
-        is_ctrl = keyboard.is_pressed('ctrl') or keyboard.is_pressed('left ctrl') or keyboard.is_pressed('right ctrl')
         if state.mode == "SOLVER":
             threading.Thread(target=handle_solver_action, daemon=True).start()
         else:
             if not state.typing_active:
-                model = MODEL_PRO if is_ctrl else MODEL_FLASH
-                threading.Thread(target=handle_typer_action, args=(model,), daemon=True).start()
+                threading.Thread(target=handle_typer_action, daemon=True).start()
 
 def main():
     log("=== OMNI ASSISTANT MONOLITH ===")
