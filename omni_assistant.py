@@ -13,6 +13,7 @@ import google.generativeai as genai
 from PIL import ImageGrab
 import tkinter as tk
 from tkinter import ttk, messagebox
+import re 
 
 # --- STATE ---
 class AssistantState:
@@ -23,10 +24,21 @@ class AssistantState:
         
         # Configurable Settings
         self.api_key = "AIzaSyDze9Z5aCrxJR9G5YmpcpvNXOOeAgEmK6s"
-        self.model_flash = "gemini-3.1-flash-lite-preview"
+        self.model_flash = "gemini-3-flash-preview"
         self.model_pro = "gemini-3.1-pro-preview"
         self.model_solver = "gemini-3-flash-preview"
-        self.system_instr_typer = "Answer with only the final result. Do not include explanations, words, punctuation, or formatting."
+        self.system_instr_typer = (
+            "You are an Elite Competitive Programmer.\n"
+            "Your rules:\n"
+            "1. Write ULTRA-COMPACT(but readable) and efficient Python code. Solve the problem EXACTLY.\n"
+            "2. NO Object-Oriented Programming (no classes). NO unnecessary imports.\n"
+            "3. Use SINGLE-LETTER or 2-3 LETTER variable names (a, b, n, s, res). Minimalist code only.\n"
+            "4. Do NOT leave blank lines. Keep the code vertically and horizontally tight.\n"
+            "5. Preferred pattern for input: `a, b = map(int, input().split())` or similar clean idioms.\n"
+            "6. Return ONLY the code. No markdown code blocks (no ```python), no explanations, no comments.\n"
+            "7. DEDUCTION RULE: If you need to outdent (e.g., after a loop ends), "
+            "output exactly ONE '\\x08' character. DO NOT USE THIS RULE unless breaking out of a block."
+        )
         self.system_instr_solver = (
             "You are an Elite Solver. Solve the Math/Physics/English question in the image. "
             "Reason internally but Output ONLY the uppercase letter (A, B, C, or D). "
@@ -60,7 +72,16 @@ VK_SCROLL = 0x91
 
 # --- SYSTEM PROMPTS ---
 TYPER_INSTRUCTION = (
-    "Answer with only the final result. Do not include explanations, words, punctuation, or formatting."
+    "You are an Elite Competitive Programmer.\n"
+    "Your rules:\n"
+    "1. Write ULTRA-COMPACT and efficient Python code. Solve the problem EXACTLY.\n"
+    "2. NO Object-Oriented Programming (no classes). NO unnecessary imports.\n"
+    "3. Use SINGLE-LETTER or 2-3 LETTER variable names (a, b, n, s, res). Minimalist code only.\n"
+    "4. Do NOT leave blank lines. Keep the code vertically and horizontally tight.\n"
+    "5. Preferred pattern for input: `a, b = map(int, input().split())` or similar clean idioms.\n"
+    "6. Return ONLY the code. No markdown code blocks (no ```python), no explanations, no comments.\n"
+    "7. DEDUCTION RULE: If you need to outdent (e.g., after a loop ends), "
+    "output exactly ONE '\\x08' character. DO NOT USE THIS RULE unless breaking out of a block."
 )
 
 SOLVER_INSTRUCTION = (
@@ -77,6 +98,8 @@ INDICATOR_MAP = {
     "D": (True,  True,  True),
     "?": (False, False, False),
 }
+
+
 
 # --- UTILITIES ---
 def log(msg, level="INFO"):
@@ -130,13 +153,9 @@ def img_to_bytes(img):
 
 def strip_markdown(code):
     code = code.replace('\r', '').strip()
-    if code.startswith("```"):
-        lines = code.split("\n")
-        if lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        code = "\n".join(lines)
+    match = re.search(r"```(?:python)?\n?(.*?)\n?```", code, re.DOTALL | re.IGNORECASE)
+    if match:
+        code = match.group(1).strip()
     return code.strip()
 
 def adjust_for_autoindent(code):
@@ -237,15 +256,30 @@ threading.Thread(target=typing_worker, daemon=True).start()
 
 def on_typing_key(event):
     is_down = event.event_type == keyboard.KEY_DOWN
+    
+    # Handled Keys first (Esc, F8, F9, Ctrl+I, Backspace)
     if event.name == 'f8':
         if is_down:
             state.edit_mode = not state.edit_mode
             log(f"Edit Mode: {'ON' if state.edit_mode else 'OFF'}")
         return False
     if state.edit_mode: return True
+    
+    if event.name == 'f9':
+        if is_down:
+            stop_typing_mode("Mode switch requested.")
+            toggle_mode()
+        return False
+
+    if event.name == 'i' and (keyboard.is_pressed('ctrl') or keyboard.is_pressed('left ctrl')):
+        if is_down:
+            threading.Thread(target=open_settings_menu, daemon=True).start()
+        return False
+
     if event.name == 'esc':
         if is_down: stop_typing_mode("Typing cancelled.")
         return False
+
     if event.name == 'backspace':
         if is_down:
             with state.lock:
@@ -253,26 +287,19 @@ def on_typing_key(event):
             typing_queue.put('\x08')
         return False
     
-    # Check for mode switch or settings while in typing mode
-    if is_down:
-        if event.name == 'f9':
-            stop_typing_mode("Mode switch requested.")
-            toggle_mode()
-            return False
-        if event.name == 'i' and (keyboard.is_pressed('ctrl') or keyboard.is_pressed('left ctrl')):
-            threading.Thread(target=open_settings_menu, daemon=True).start()
-            return False
-
+    # Typer Trigger
     if is_down:
         with state.lock:
             if not state.typing_active or state.code_index >= len(state.code_buffer):
-                if state.code_index >= len(state.code_buffer):
+                if state.code_index >= len(state.code_buffer) and state.typing_active:
                     stop_typing_mode("Done typing!")
                 return False
             ch = state.code_buffer[state.code_index]
             state.code_index += 1
+            # log(f"Trigger: '{event.name}' -> Char: '{ch}'")
         typing_queue.put(ch)
-    return False
+    return False # Strict suppression of ALL other keys
+    
 
 def start_typing_mode():
     if state.typing_hook is None:
