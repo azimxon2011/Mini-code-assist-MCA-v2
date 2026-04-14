@@ -15,6 +15,34 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import re 
 
+# --- SYSTEM PROMPTS ---
+TYPER_INSTRUCTION = (
+    "You are an Elite Competitive Programmer.\n"
+    "Rules:\n"
+    "1. Solve the problem EXACTLY. Write efficient, READABLE Python code.\n"
+    "2. Do not overengineer. But beware Runtime Errors.\n"
+    "3. Use 2-SPACE INDENTATION strictly. Every nested block must be indented exactly 2 spaces more than its parent.\n"
+    "4. `else`, `elif` must align with their matching `if`.\n"
+    "5. No OOP (no classes). No imports. No `def`s.\n"
+    "6. Short variable names (1-5 characters) related to the problem.\n"
+    "7. Return ONLY the raw code. No markdown, no explanations, no comments."
+)
+
+SOLVER_INSTRUCTION = (
+    "You are an Elite Solver. Solve the Math/Physics/English question in the image. "
+    "Reason internally but Output ONLY the uppercase letter (A, B, C, or D). "
+    "No text, no explanation. If there is answer marked already recheck it and output right answer."
+)
+
+# indicator states for Solver: (NumLock, CapsLock, ScrollLock)
+INDICATOR_MAP = {
+    "A": (True,  False, False),
+    "B": (False, True,  False),
+    "C": (False, False, True),
+    "D": (True,  True,  True),
+    "?": (False, False, False),
+}
+
 # --- STATE ---
 class AssistantState:
     def __init__(self):
@@ -27,23 +55,8 @@ class AssistantState:
         self.model_flash = "gemini-3-flash-preview"
         self.model_pro = "gemini-3.1-pro-preview"
         self.model_solver = "gemini-3-flash-preview"
-        self.system_instr_typer = (
-            "You are an Elite Competitive Programmer.\n"
-            "Your rules:\n"
-            "1. Write ULTRA-COMPACT(but readable) and efficient Python code. Solve the problem EXACTLY.\n"
-            "2. NO Object-Oriented Programming (no classes). NO unnecessary imports.\n"
-            "3. Use SINGLE-LETTER or 2-3 LETTER variable names (a, b, n, s, res). Minimalist code only.\n"
-            "4. Do NOT leave blank lines. Keep the code vertically and horizontally tight.\n"
-            "5. Preferred pattern for input: `a, b = map(int, input().split())` or similar clean idioms.\n"
-            "6. Return ONLY the code. No markdown code blocks (no ```python), no explanations, no comments.\n"
-            "7. DEDUCTION RULE: If you need to outdent (e.g., after a loop ends), "
-            "output exactly ONE '\\x08' character. DO NOT USE THIS RULE unless breaking out of a block."
-        )
-        self.system_instr_solver = (
-            "You are an Elite Solver. Solve the Math/Physics/English question in the image. "
-            "Reason internally but Output ONLY the uppercase letter (A, B, C, or D). "
-            "No text, no explanation. If there is answer marked already recheck it and output right answer."
-        )
+        self.system_instr_typer = TYPER_INSTRUCTION
+        self.system_instr_solver = SOLVER_INSTRUCTION
         
         # Typer Specific
         self.code_buffer = ""
@@ -69,38 +82,6 @@ genai.configure(api_key=state.api_key)
 VK_NUM = 0x90
 VK_CAPS = 0x14
 VK_SCROLL = 0x91
-
-# --- SYSTEM PROMPTS ---
-TYPER_INSTRUCTION = (
-    "You are an Elite Competitive Programmer.\n"
-    "Your rules:\n"
-    "1. Write ULTRA-COMPACT and efficient Python code. Solve the problem EXACTLY.\n"
-    "2. NO Object-Oriented Programming (no classes). NO unnecessary imports.\n"
-    "3. Use SINGLE-LETTER or 2-3 LETTER variable names (a, b, n, s, res). Minimalist code only.\n"
-    "4. Do NOT leave blank lines. Keep the code vertically and horizontally tight.\n"
-    "5. Preferred pattern for input: `a, b = map(int, input().split())` or similar clean idioms.\n"
-    "6. Return ONLY the code. No markdown code blocks (no ```python), no explanations, no comments.\n"
-    "7. DEDUCTION RULE: If you need to outdent (e.g., after a loop ends), "
-    "output exactly ONE '\\x08' character. DO NOT USE THIS RULE unless breaking out of a block."
-)
-
-SOLVER_INSTRUCTION = (
-    "You are an Elite Solver. Solve the Math/Physics/English question in the image. "
-    "Reason internally but Output ONLY the uppercase letter (A, B, C, or D). "
-    "No text, no explanation. If there is answer marked already recheck it and output right answer."
-)
-
-# indicator states for Solver: (NumLock, CapsLock, ScrollLock)
-INDICATOR_MAP = {
-    "A": (True,  False, False),
-    "B": (False, True,  False),
-    "C": (False, False, True),
-    "D": (True,  True,  True),
-    "?": (False, False, False),
-}
-
-
-
 # --- UTILITIES ---
 def log(msg, level="INFO"):
     ts = time.strftime("%H:%M:%S")
@@ -159,25 +140,35 @@ def strip_markdown(code):
     return code.strip()
 
 def adjust_for_autoindent(code):
+    """Convert code for Robocontest editor.
+    
+    Robocontest: 2-space indentation, 1 backspace = 1 space.
+    After a line ending with ':', the editor auto-indents by +2 spaces.
+    So we track editor_indent and emit backspaces for the difference.
+    """
+    code = code.replace('\x08', '')  # strip any hallucinated backspaces from model
     lines = code.split('\n')
     result = []
-    editor_indent = 0
+    editor_indent = 0  # where the editor cursor will be at start of next line
     for line in lines:
         if not line.strip():
             result.append('')
             continue
-        original_indent = len(line) - len(line.lstrip(' '))
+        target_indent = len(line) - len(line.lstrip(' '))
         content = line.lstrip(' ')
-        if original_indent < editor_indent:
-            outdent_levels = (editor_indent - original_indent) // 4
-            result.append('\x08' * outdent_levels + content)
+        if target_indent < editor_indent:
+            # Editor auto-indented too far; press backspace for each extra space
+            bs_count = editor_indent - target_indent
+            result.append('\x08' * bs_count + content)
         else:
-            extra_spaces = original_indent - editor_indent
-            result.append(' ' * extra_spaces + content)
+            # Editor is behind or equal; add the extra spaces manually
+            extra = target_indent - editor_indent
+            result.append(' ' * extra + content)
+        # After typing this line, predict where the editor will put the cursor next
         if content.rstrip().endswith(':'):
-            editor_indent = original_indent + 4
+            editor_indent = target_indent + 2  # Robocontest auto-indents +2 after colon
         else:
-            editor_indent = original_indent
+            editor_indent = target_indent
     return '\n'.join(result)
 
 # --- SETTINGS MENU (TKINTER) ---
@@ -333,7 +324,7 @@ def handle_typer_action(model_name=None):
             log(f"Typing: Capture taken. Asking Gemini ({model_name})...")
             gen_model = genai.GenerativeModel(model_name=model_name, system_instruction=state.system_instr_typer)
             response = gen_model.generate_content([
-                "Return code/text for this image.", 
+                "Solve this Robocontest problem and return the Python code. (Environment: PyPy)", 
                 {"inline_data": {"mime_type": "image/png", "data": base64.b64encode(img_data).decode()}}
             ])
             code = adjust_for_autoindent(strip_markdown(response.text))
