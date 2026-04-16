@@ -34,6 +34,18 @@ SOLVER_INSTRUCTION = (
     "No text, no explanation. If there is answer marked already recheck it and output right answer."
 )
 
+TYPER_CPP_INSTRUCTION = (
+    "You are an Elite Competitive Programmer.\n"
+    "Rules:\n"
+    "1. Solve the problem EXACTLY. Write VERY CLEAR, UNDERSTANDABLE C++ code.\n"
+    "2. Code should look like it was written by a normal human student, not a system engineer. Avoid overly complex syntax, macros, or obscure STL features unless necessary. Keep it simple and readable.\n"
+    "3. Use 2-SPACE INDENTATION strictly.\n"
+    "4. Include standard headers like <iostream>, <vector>, <string>, etc. using `using namespace std;`.\n"
+    "5. Use `int main()` as the entry point.\n"
+    "6. Short but meaningful variable names related to the problem.\n"
+    "7. Return ONLY the raw code. No markdown, no explanations, no comments."
+)
+
 # indicator states for Solver: (NumLock, CapsLock, ScrollLock)
 INDICATOR_MAP = {
     "A": (True,  False, False),
@@ -46,7 +58,7 @@ INDICATOR_MAP = {
 # --- STATE ---
 class AssistantState:
     def __init__(self):
-        self.mode = "SOLVER"  # "SOLVER" or "TYPER"
+        self.mode = "SOLVER"  # "SOLVER", "TYPER_PYTHON" or "TYPER_CPP"
         self.busy = False
         self.lock = threading.Lock()
         
@@ -56,6 +68,7 @@ class AssistantState:
         self.model_pro = "gemini-3.1-pro-preview"
         self.model_solver = "gemini-3-flash-preview"
         self.system_instr_typer = TYPER_INSTRUCTION
+        self.system_instr_typer_cpp = TYPER_CPP_INSTRUCTION
         self.system_instr_solver = SOLVER_INSTRUCTION
         
         # Typer Specific
@@ -107,16 +120,16 @@ def set_leds(num=None, caps=None, scroll=None):
 def loading_heartbeat():
     """Blinks indicators while loading_event is set."""
     while state.loading_event.is_set():
-        if state.mode == "SOLVER":
+        if state.mode.startswith("TYPER"):
             set_leds(num=True)
-            time.sleep(0.3)
+            time.sleep(6)
             set_leds(num=False)
-            time.sleep(0.3)
+            time.sleep(6)
         else:
             set_leds(num=True, scroll=True)
-            time.sleep(0.3)
+            time.sleep(6)
             set_leds(num=False, scroll=False)
-            time.sleep(0.3)
+            time.sleep(6)
     set_leds(num=False, scroll=False)
 
 def get_screenshot():
@@ -134,7 +147,7 @@ def img_to_bytes(img):
 
 def strip_markdown(code):
     code = code.replace('\r', '').strip()
-    match = re.search(r"```(?:python)?\n?(.*?)\n?```", code, re.DOTALL | re.IGNORECASE)
+    match = re.search(r"```(?:python|cpp|c\+\+|c)?\n?(.*?)\n?```", code, re.DOTALL | re.IGNORECASE)
     if match:
         code = match.group(1).strip()
     return code.strip()
@@ -165,8 +178,8 @@ def adjust_for_autoindent(code):
             extra = target_indent - editor_indent
             result.append(' ' * extra + content)
         # After typing this line, predict where the editor will put the cursor next
-        if content.rstrip().endswith(':'):
-            editor_indent = target_indent + 2  # Robocontest auto-indents +2 after colon
+        if content.rstrip().endswith(':') or content.rstrip().endswith('{'):
+            editor_indent = target_indent + 2  # Robocontest auto-indents +2 after colon or brace
         else:
             editor_indent = target_indent
     return '\n'.join(result)
@@ -178,7 +191,7 @@ def open_settings_menu():
     
     root = tk.Tk()
     root.title("Settings")
-    root.geometry("400x450")
+    root.geometry("400x550")
     root.attributes('-topmost', True)
     
     main_frame = ttk.Frame(root, padding=10)
@@ -202,6 +215,7 @@ def open_settings_menu():
     pro_e = add_entry("Pro Model", "model_pro")
     solve_model_e = add_entry("Solver Model", "model_solver")
     typer_i = add_entry("Typer Instr", "system_instr_typer", True)
+    typer_cpp_i = add_entry("Typer C++ Instr", "system_instr_typer_cpp", True)
     solver_i = add_entry("Solver Instr", "system_instr_solver", True)
 
     def on_apply():
@@ -211,6 +225,7 @@ def open_settings_menu():
             state.model_pro = pro_e.get().strip()
             state.model_solver = solve_model_e.get().strip()
             state.system_instr_typer = typer_i.get("1.0", tk.END).strip()
+            state.system_instr_typer_cpp = typer_cpp_i.get("1.0", tk.END).strip()
             state.system_instr_solver = solver_i.get("1.0", tk.END).strip()
             genai.configure(api_key=state.api_key)
         log("Applied.")
@@ -313,6 +328,10 @@ def handle_typer_action(model_name=None):
             # Determine based on Ctrl mod used at trigger time
             is_ctrl = keyboard.is_pressed('ctrl') or keyboard.is_pressed('left ctrl')
             model_name = state.model_pro if is_ctrl else state.model_flash
+        is_cpp = (state.mode == "TYPER_CPP")
+        lang_str = "C++" if is_cpp else "Python"
+        env_str = "GCC" if is_cpp else "PyPy"
+        system_instr = state.system_instr_typer_cpp if is_cpp else state.system_instr_typer
     
     try:
         state.loading_event.set()
@@ -321,10 +340,10 @@ def handle_typer_action(model_name=None):
         img = get_screenshot()
         if img:
             img_data = img_to_bytes(img)
-            log(f"Typing: Capture taken. Asking Gemini ({model_name})...")
-            gen_model = genai.GenerativeModel(model_name=model_name, system_instruction=state.system_instr_typer)
+            log(f"Typing ({lang_str}): Capture taken. Asking Gemini ({model_name})...")
+            gen_model = genai.GenerativeModel(model_name=model_name, system_instruction=system_instr)
             response = gen_model.generate_content([
-                "Solve this Robocontest problem and return the Python code. (Environment: PyPy)", 
+                f"Solve this Robocontest problem and return the {lang_str} code. (Environment: {env_str})", 
                 {"inline_data": {"mime_type": "image/png", "data": base64.b64encode(img_data).decode()}}
             ])
             code = adjust_for_autoindent(strip_markdown(response.text))
@@ -388,7 +407,9 @@ def handle_solver_action():
 def toggle_mode():
     with state.lock:
         if state.mode == "SOLVER":
-            state.mode = "TYPER"
+            state.mode = "TYPER_PYTHON"
+        elif state.mode == "TYPER_PYTHON":
+            state.mode = "TYPER_CPP"
         else:
             state.mode = "SOLVER"
         log(f"MODE SWITCHED: Now in {state.mode} mode.")
@@ -420,7 +441,7 @@ def on_global_hotkey(event):
 
 def main():
     log("=== OMNI ASSISTANT MONOLITH ===")
-    log("F9            : Switch Mode (Solver <-> Typer)")
+    log("F9            : Switch Mode (Solver -> Typer_Python -> Typer_CPP)")
     log("RightShift    : Capture & Execute Action")
     log("Default Mode  : SOLVER")
     log("-------------------------------")
