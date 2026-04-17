@@ -5,15 +5,23 @@ import time
 import base64
 import threading
 import hashlib
+import queue
 import keyboard
 import ctypes
 import win32api
 import win32con
-import google.generativeai as genai
+import google.generativeai as legacy_genai
 from PIL import ImageGrab
 import tkinter as tk
 from tkinter import ttk, messagebox
 import re 
+
+try:
+    from google import genai as genai_sdk
+    from google.genai import types as genai_types
+except ImportError:
+    genai_sdk = None
+    genai_types = None
 
 # --- SYSTEM PROMPTS ---
 TYPER_INSTRUCTION = (
@@ -70,6 +78,9 @@ class AssistantState:
         self.system_instr_typer = TYPER_INSTRUCTION
         self.system_instr_typer_cpp = TYPER_CPP_INSTRUCTION
         self.system_instr_solver = SOLVER_INSTRUCTION
+        self.gemini_stream_first_chunk_timeout = 20
+        self.gemini_stream_chunk_timeout = 20
+        self.gemini_pro_stream_first_chunk_timeout = 60
         
         # Typer Specific
         self.code_buffer = ""
@@ -89,7 +100,7 @@ class AssistantState:
 state = AssistantState()
 
 # Initialize GenAI with default key
-genai.configure(api_key=state.api_key)
+legacy_genai.configure(api_key=state.api_key)
 
 # --- VIRTUAL KEYS ---
 VK_NUM = 0x90
@@ -131,6 +142,129 @@ def loading_heartbeat():
             set_leds(num=False, scroll=False)
             time.sleep(6)
     set_leds(num=False, scroll=False)
+
+def sdk_supports_thinking_stream():
+    return genai_sdk is not None and genai_types is not None
+
+def get_stream_timeouts(model_name):
+    first_chunk_timeout = state.gemini_stream_first_chunk_timeout
+    if "pro" in model_name.lower():
+        first_chunk_timeout = state.gemini_pro_stream_first_chunk_timeout
+    return first_chunk_timeout, state.gemini_stream_chunk_timeout
+
+def iter_chunk_parts(chunk):
+    candidates = getattr(chunk, "candidates", None) or []
+    for candidate in candidates:
+        content = getattr(candidate, "content", None)
+        parts = getattr(content, "parts", None) or []
+        for part in parts:
+            yield part
+
+def consume_stream_with_watchdog(stream_factory, first_chunk_timeout, chunk_timeout):
+    events = queue.Queue()
+
+    def worker():
+        try:
+            for chunk in stream_factory():
+                events.put(("chunk", chunk))
+            events.put(("done", None))
+        except Exception as e:
+            events.put(("error", e))
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    saw_thought = False
+    thought_buf = []
+    answer_buf = []
+    saw_any_chunk = False
+
+    while True:
+        current_timeout = chunk_timeout if saw_any_chunk else first_chunk_timeout
+        try:
+            event_type, payload = events.get(timeout=current_timeout)
+        except queue.Empty:
+            if saw_thought:
+                status = "after thinking started"
+            elif saw_any_chunk:
+                status = "between stream chunks before final answer"
+            else:
+                status = "before any thinking/answer chunks"
+            raise TimeoutError(f"Gemini stream stalled for {current_timeout}s {status}.")
+
+        if event_type == "error":
+            raise payload
+        if event_type == "done":
+            break
+
+        chunk = payload
+        saw_any_chunk = True
+        chunk_used = False
+        for part in iter_chunk_parts(chunk):
+            text = getattr(part, "text", None)
+            if not text:
+                continue
+            chunk_used = True
+            if getattr(part, "thought", False):
+                if not saw_thought:
+                    log("Gemini: thinking stream started.")
+                saw_thought = True
+                thought_buf.append(text)
+            else:
+                if saw_thought and not answer_buf:
+                    log("Gemini: thinking finished, receiving final answer.")
+                answer_buf.append(text)
+
+        if not chunk_used:
+            text = getattr(chunk, "text", None)
+            if text:
+                answer_buf.append(text)
+
+    final_text = "".join(answer_buf).strip()
+    if not final_text:
+        raise RuntimeError("Gemini stream ended without a final answer.")
+    return final_text, saw_thought, "".join(thought_buf)
+
+def generate_gemini_text(model_name, system_instr, prompt, image_bytes):
+    if sdk_supports_thinking_stream():
+        client = genai_sdk.Client(api_key=state.api_key)
+        contents = [
+            prompt,
+            genai_types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
+        ]
+
+        def stream_with_thoughts():
+            config = genai_types.GenerateContentConfig(
+                system_instruction=system_instr,
+                thinking_config=genai_types.ThinkingConfig(include_thoughts=True),
+            )
+            return client.models.generate_content_stream(
+                model=model_name,
+                contents=contents,
+                config=config,
+            )
+
+        first_chunk_timeout, chunk_timeout = get_stream_timeouts(model_name)
+
+        text, saw_thought, _ = consume_stream_with_watchdog(
+            stream_with_thoughts,
+            first_chunk_timeout,
+            chunk_timeout,
+        )
+        if saw_thought:
+            log("Gemini: request completed after visible thinking.")
+        else:
+            log("Gemini: stream completed, but thoughts were not exposed.", "WARN")
+        return text
+
+    gen_model = legacy_genai.GenerativeModel(
+        model_name=model_name,
+        system_instruction=system_instr,
+    )
+    response = gen_model.generate_content([
+        prompt,
+        {"inline_data": {"mime_type": "image/png", "data": base64.b64encode(image_bytes).decode()}},
+    ])
+    return response.text
 
 def get_screenshot():
     try:
@@ -227,7 +361,7 @@ def open_settings_menu():
             state.system_instr_typer = typer_i.get("1.0", tk.END).strip()
             state.system_instr_typer_cpp = typer_cpp_i.get("1.0", tk.END).strip()
             state.system_instr_solver = solver_i.get("1.0", tk.END).strip()
-            genai.configure(api_key=state.api_key)
+            legacy_genai.configure(api_key=state.api_key)
         log("Applied.")
         root.destroy()
         state.menu_open = False
@@ -248,7 +382,6 @@ def type_one_char(ch):
     elif ch == ' ': keyboard.press_and_release('space')
     else: keyboard.write(ch)
 
-import queue
 typing_queue = queue.Queue()
 
 def typing_worker():
@@ -341,12 +474,13 @@ def handle_typer_action(model_name=None):
         if img:
             img_data = img_to_bytes(img)
             log(f"Typing ({lang_str}): Capture taken. Asking Gemini ({model_name})...")
-            gen_model = genai.GenerativeModel(model_name=model_name, system_instruction=system_instr)
-            response = gen_model.generate_content([
-                f"Solve this Robocontest problem and return the {lang_str} code. (Environment: {env_str})", 
-                {"inline_data": {"mime_type": "image/png", "data": base64.b64encode(img_data).decode()}}
-            ])
-            code = adjust_for_autoindent(strip_markdown(response.text))
+            code_text = generate_gemini_text(
+                model_name,
+                system_instr,
+                f"Solve this Robocontest problem and return the {lang_str} code. (Environment: {env_str})",
+                img_data,
+            )
+            code = adjust_for_autoindent(strip_markdown(code_text))
             
             with state.lock:
                 state.code_buffer = code
@@ -383,12 +517,13 @@ def handle_solver_action():
         threading.Thread(target=loading_heartbeat, daemon=True).start()
         
         log(f"Solver: Analyzing... ({model_name})")
-        gen_model = genai.GenerativeModel(model_name=model_name, system_instruction=state.system_instr_solver)
-        response = gen_model.generate_content([
+        response_text = generate_gemini_text(
+            model_name,
+            state.system_instr_solver,
             "Solve this question (A/B/C/D).",
-            {"inline_data": {"mime_type": "image/png", "data": base64.b64encode(img_bytes).decode()}}
-        ])
-        ans = response.text.strip().upper()[:1]
+            img_bytes,
+        )
+        ans = response_text.strip().upper()[:1]
         if ans not in "ABCD": ans = "?"
         
         log(f"Solver: Answer discovered -> {ans}")
