@@ -52,13 +52,20 @@ TYPER_CPP_INSTRUCTION = (
     "7. Return ONLY the raw code. No markdown, no explanations, no comments."
 )
 
-# indicator states for Solver: (NumLock, CapsLock, ScrollLock)
+# solver answer states: (NumLock, CapsLock, ScrollLock)
 INDICATOR_MAP = {
     "A": (True,  False, False),
     "B": (False, True,  False),
     "C": (False, False, True),
     "D": (True,  True,  True),
     "?": (False, False, False),
+}
+
+# idle mode states
+MODE_INDICATOR_MAP = {
+    "SOLVER": (False, True,  False),
+    "TYPER_PYTHON": (True,  False, False),
+    "TYPER_CPP": (False, False, True),
 }
 
 # --- STATE ---
@@ -90,6 +97,7 @@ class AssistantState:
         # Solver Specific
         self.last_img_hash = None
         self.last_letter = "?"
+        self.last_solver_indicator_until = 0.0
         
         # Global
         self.loading_event = threading.Event()
@@ -123,20 +131,32 @@ def set_leds(num=None, caps=None, scroll=None):
     if scroll is not None and get_toggle_state(VK_SCROLL) != scroll:
         press_key(VK_SCROLL)
 
+def get_indicator_state():
+    """Returns the LED pattern for the current assistant state."""
+    now = time.time()
+
+    if state.typing_active:
+        return (True, False, True)
+
+    if state.mode == "SOLVER" and now < state.last_solver_indicator_until:
+        return INDICATOR_MAP.get(state.last_letter, INDICATOR_MAP["?"])
+
+    return MODE_INDICATOR_MAP.get(state.mode, (False, False, False))
+
+def refresh_indicators():
+    """Applies the current non-loading LED state."""
+    if state.loading_event.is_set():
+        return
+    set_leds(*get_indicator_state())
+
 def loading_heartbeat():
     """Blinks indicators while loading_event is set."""
     while state.loading_event.is_set():
-        if state.mode.startswith("TYPER"):
-            set_leds(num=True)
-            time.sleep(6)
-            set_leds(num=False)
-            time.sleep(6)
-        else:
-            set_leds(num=True, scroll=True)
-            time.sleep(6)
-            set_leds(num=False, scroll=False)
-            time.sleep(6)
-    set_leds(num=False, scroll=False)
+        set_leds(True, False, True)
+        time.sleep(0.35)
+        set_leds(False, False, False)
+        time.sleep(0.35)
+    refresh_indicators()
 
 def sdk_supports_thinking_stream():
     return genai_sdk is not None and genai_types is not None
@@ -435,6 +455,7 @@ def start_typing_mode():
     if state.typing_hook is None:
         state.typing_hook = keyboard.hook(on_typing_key, suppress=True)
     log("Typing ACTIVE - Press ANY key to type code.")
+    refresh_indicators()
 
 def stop_typing_mode(reason=""):
     state.typing_active = False
@@ -442,6 +463,7 @@ def stop_typing_mode(reason=""):
         keyboard.unhook(state.typing_hook)
         state.typing_hook = None
     if reason: log(reason)
+    refresh_indicators()
 
 # --- ACTION HANDLERS ---
 def handle_typer_action(model_name=None):
@@ -484,6 +506,7 @@ def handle_typer_action(model_name=None):
     finally:
         state.loading_event.clear()
         with state.lock: state.busy = False
+        refresh_indicators()
 
 def handle_solver_action():
     with state.lock:
@@ -500,8 +523,8 @@ def handle_solver_action():
         if curr_hash == state.last_img_hash:
             ans = state.last_letter
             log(f"Solver: Same image detected. Answer: {ans}")
-            states = INDICATOR_MAP.get(ans, INDICATOR_MAP["?"])
-            set_leds(*states)
+            state.last_solver_indicator_until = time.time() + 8
+            refresh_indicators()
             return
 
         state.loading_event.set()
@@ -520,15 +543,15 @@ def handle_solver_action():
         log(f"Solver: Answer discovered -> {ans}")
         state.last_img_hash = curr_hash
         state.last_letter = ans
-        
-        states = INDICATOR_MAP.get(ans, INDICATOR_MAP["?"])
-        set_leds(*states)
+        state.last_solver_indicator_until = time.time() + 8
+        refresh_indicators()
         
     except Exception as e:
         log(f"Solver Error: {e}", "ERROR")
     finally:
         state.loading_event.clear()
         with state.lock: state.busy = False
+        refresh_indicators()
 
 def toggle_mode():
     with state.lock:
@@ -541,7 +564,7 @@ def toggle_mode():
         log(f"MODE SWITCHED: Now in {state.mode} mode.")
     set_leds(True, True, True)
     time.sleep(0.2)
-    set_leds(False, False, False)
+    refresh_indicators()
 
 def on_global_hotkey(event):
     if event.event_type != keyboard.KEY_DOWN: return
@@ -570,7 +593,10 @@ def main():
     log("F9            : Switch Mode (Solver -> Typer_Python -> Typer_CPP)")
     log("RightShift    : Capture & Execute Action")
     log("Default Mode  : SOLVER")
+    log("Indicators    : Loading=ALL blink | Idle Solver=Caps | Idle Py=Num | Idle C++=Scroll")
+    log("Indicators    : Ready Py=Num+Caps | Ready C++=Caps+Scroll | Solver answer shown for 8s")
     log("-------------------------------")
+    refresh_indicators()
     
     keyboard.hook(on_global_hotkey)
     
