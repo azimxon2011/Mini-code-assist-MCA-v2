@@ -1,0 +1,7 @@
+.kilocode
+__pycache__
+temp_build
+.venv-build
+dist
+build
+*.spec

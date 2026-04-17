@@ -2,7 +2,6 @@
 import sys
 import io
 import time
-import base64
 import threading
 import hashlib
 import queue
@@ -10,7 +9,6 @@ import keyboard
 import ctypes
 import win32api
 import win32con
-import google.generativeai as legacy_genai
 from PIL import ImageGrab
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -99,9 +97,6 @@ class AssistantState:
 
 state = AssistantState()
 
-# Initialize GenAI with default key
-legacy_genai.configure(api_key=state.api_key)
-
 # --- VIRTUAL KEYS ---
 VK_NUM = 0x90
 VK_CAPS = 0x14
@@ -145,6 +140,12 @@ def loading_heartbeat():
 
 def sdk_supports_thinking_stream():
     return genai_sdk is not None and genai_types is not None
+
+def require_genai_sdk():
+    if not sdk_supports_thinking_stream():
+        raise RuntimeError(
+            "google-genai is not installed. Install the new SDK and remove legacy google-generativeai from the build."
+        )
 
 def get_stream_timeouts(model_name):
     first_chunk_timeout = state.gemini_stream_first_chunk_timeout
@@ -225,46 +226,37 @@ def consume_stream_with_watchdog(stream_factory, first_chunk_timeout, chunk_time
     return final_text, saw_thought, "".join(thought_buf)
 
 def generate_gemini_text(model_name, system_instr, prompt, image_bytes):
-    if sdk_supports_thinking_stream():
-        client = genai_sdk.Client(api_key=state.api_key)
-        contents = [
-            prompt,
-            genai_types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
-        ]
+    require_genai_sdk()
 
-        def stream_with_thoughts():
-            config = genai_types.GenerateContentConfig(
-                system_instruction=system_instr,
-                thinking_config=genai_types.ThinkingConfig(include_thoughts=True),
-            )
-            return client.models.generate_content_stream(
-                model=model_name,
-                contents=contents,
-                config=config,
-            )
-
-        first_chunk_timeout, chunk_timeout = get_stream_timeouts(model_name)
-
-        text, saw_thought, _ = consume_stream_with_watchdog(
-            stream_with_thoughts,
-            first_chunk_timeout,
-            chunk_timeout,
-        )
-        if saw_thought:
-            log("Gemini: request completed after visible thinking.")
-        else:
-            log("Gemini: stream completed, but thoughts were not exposed.", "WARN")
-        return text
-
-    gen_model = legacy_genai.GenerativeModel(
-        model_name=model_name,
-        system_instruction=system_instr,
-    )
-    response = gen_model.generate_content([
+    client = genai_sdk.Client(api_key=state.api_key)
+    contents = [
         prompt,
-        {"inline_data": {"mime_type": "image/png", "data": base64.b64encode(image_bytes).decode()}},
-    ])
-    return response.text
+        genai_types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
+    ]
+
+    def stream_with_thoughts():
+        config = genai_types.GenerateContentConfig(
+            system_instruction=system_instr,
+            thinking_config=genai_types.ThinkingConfig(include_thoughts=True),
+        )
+        return client.models.generate_content_stream(
+            model=model_name,
+            contents=contents,
+            config=config,
+        )
+
+    first_chunk_timeout, chunk_timeout = get_stream_timeouts(model_name)
+
+    text, saw_thought, _ = consume_stream_with_watchdog(
+        stream_with_thoughts,
+        first_chunk_timeout,
+        chunk_timeout,
+    )
+    if saw_thought:
+        log("Gemini: request completed after visible thinking.")
+    else:
+        log("Gemini: stream completed, but thoughts were not exposed.", "WARN")
+    return text
 
 def get_screenshot():
     try:
@@ -361,7 +353,6 @@ def open_settings_menu():
             state.system_instr_typer = typer_i.get("1.0", tk.END).strip()
             state.system_instr_typer_cpp = typer_cpp_i.get("1.0", tk.END).strip()
             state.system_instr_solver = solver_i.get("1.0", tk.END).strip()
-            legacy_genai.configure(api_key=state.api_key)
         log("Applied.")
         root.destroy()
         state.menu_open = False

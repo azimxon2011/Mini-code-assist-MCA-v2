@@ -1,0 +1,5 @@
+pyinstaller
+pillow
+keyboard
+pywin32
+google-genai

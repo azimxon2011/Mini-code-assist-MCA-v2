@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['..\\omni_assistant.py'],
+    ['C:\\Users\\Abubakr\\Desktop\\MainCode\\omni_assistant.py'],
     pathex=[],
     binaries=[],
     datas=[],
@@ -10,7 +10,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['numpy', 'PyQt6', 'PyQt6.Qt6', 'PyQt6.sip', 'playwright', 'pygame', 'scipy', 'pandas', 'matplotlib', 'traitlets', 'jinja2', 'markupsafe', 'paddlex', 'tensorboard', 'deepface', 'icrawler', 'pdf2image', 'pystray', 'reportlab', 'retina-face'],
+    excludes=[],
     noarchive=False,
     optimize=0,
 )
@@ -35,5 +35,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['c:\\Users\\Abubakr\\Desktop\\MainCode\\python_icon.ico'],
+    icon=['C:\\Users\\Abubakr\\Desktop\\MainCode\\python_icon.ico'],
 )
