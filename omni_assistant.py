@@ -92,6 +92,8 @@ class AssistantState:
         self.loading_event = threading.Event()
         self.menu_open = False
         self.cancel_event = threading.Event()
+        self.rshift_timer = None
+        self.request_id = 0
 
 state = AssistantState()
 
@@ -341,6 +343,8 @@ def handle_typer_action(model_name=None):
         if state.busy: return
         state.busy = True
         state.cancel_event.clear()
+        state.request_id += 1
+        my_req_id = state.request_id
         if model_name is None:
             # Determine based on Ctrl mod used at trigger time
             is_ctrl = keyboard.is_pressed('ctrl') or keyboard.is_pressed('left ctrl')
@@ -363,7 +367,7 @@ def handle_typer_action(model_name=None):
                 f"Solve this Robocontest problem and return the {lang_str} code. (Environment: {env_str})", 
                 {"inline_data": {"mime_type": "image/png", "data": base64.b64encode(img_data).decode()}}
             ])
-            if state.cancel_event.is_set():
+            if state.cancel_event.is_set() or state.request_id != my_req_id:
                 log("Typing request cancelled. Ignoring late Gemini response.")
                 return
             code = adjust_for_autoindent(strip_markdown(response.text))
@@ -377,15 +381,19 @@ def handle_typer_action(model_name=None):
     except Exception as e:
         log(f"Typer Error: {e}", "ERROR")
     finally:
-        state.loading_event.clear()
-        with state.lock: state.busy = False
-        refresh_indicators()
+        with state.lock:
+            if state.request_id == my_req_id:
+                state.loading_event.clear()
+                state.busy = False
+                refresh_indicators()
 
 def handle_solver_action():
     with state.lock:
         if state.busy: return
         state.busy = True
         state.cancel_event.clear()
+        state.request_id += 1
+        my_req_id = state.request_id
         model_name = state.model_solver
     
     try:
@@ -410,7 +418,7 @@ def handle_solver_action():
             "Solve this question (A/B/C/D).",
             {"inline_data": {"mime_type": "image/png", "data": base64.b64encode(img_bytes).decode()}}
         ])
-        if state.cancel_event.is_set():
+        if state.cancel_event.is_set() or state.request_id != my_req_id:
             log("Solver request cancelled. Ignoring late Gemini response.")
             return
         ans = response.text.strip().upper()[:1]
@@ -425,9 +433,11 @@ def handle_solver_action():
     except Exception as e:
         log(f"Solver Error: {e}", "ERROR")
     finally:
-        state.loading_event.clear()
-        with state.lock: state.busy = False
-        refresh_indicators()
+        with state.lock:
+            if state.request_id == my_req_id:
+                state.loading_event.clear()
+                state.busy = False
+                refresh_indicators()
 
 def toggle_mode():
     with state.lock:
@@ -443,12 +453,36 @@ def toggle_mode():
     refresh_indicators()
 
 def on_global_hotkey(event):
-    if event.event_type != keyboard.KEY_DOWN: return
+    is_down = event.event_type == keyboard.KEY_DOWN
+
+    # Trigger (Right Shift) with 0.5-second hold
+    is_rshift = (event.name in ('right shift', 'rightshift') or event.scan_code == 54)
+    if is_rshift:
+        if is_down:
+            if state.rshift_timer is None:
+                def trigger():
+                    if state.mode == "SOLVER":
+                        threading.Thread(target=handle_solver_action, daemon=True).start()
+                    else:
+                        if not state.typing_active:
+                            threading.Thread(target=handle_typer_action, daemon=True).start()
+                state.rshift_timer = threading.Timer(0.5, trigger)
+                state.rshift_timer.start()
+        else:
+            if state.rshift_timer is not None:
+                state.rshift_timer.cancel()
+                state.rshift_timer = None
+        return
+
+    if not is_down: return
 
     if event.name == 'esc' and state.loading_event.is_set():
         state.cancel_event.set()
         state.loading_event.clear()
-        log("Cancellation requested. Waiting for current Gemini call to return...")
+        with state.lock:
+            state.busy = False
+            state.request_id += 1
+        log("Cancellation requested. Ready for new action immediately.")
         refresh_indicators()
         return
     
@@ -462,19 +496,10 @@ def on_global_hotkey(event):
         threading.Thread(target=open_settings_menu, daemon=True).start()
         return
 
-    # Trigger (Right Shift)
-    is_rshift = (event.name in ('right shift', 'rightshift') or event.scan_code == 54)
-    if is_rshift:
-        if state.mode == "SOLVER":
-            threading.Thread(target=handle_solver_action, daemon=True).start()
-        else:
-            if not state.typing_active:
-                threading.Thread(target=handle_typer_action, daemon=True).start()
-
 def main():
     log("=== OMNI ASSISTANT MONOLITH ===")
     log("F9            : Switch Mode (Solver -> Typer_Python -> Typer_CPP)")
-    log("RightShift    : Capture & Execute Action")
+    log("RightShift    : Capture & Execute Action (Hold for 0.5 seconds)")
     log("Default Mode  : SOLVER")
     log("Indicators    : Loading=Num+Scroll blink | Idle Solver=Caps | Idle Py=Num | Idle C++=Scroll")
     log("Indicators    : Typing ready=Num+Scroll | Solver answer shown for 8s")
