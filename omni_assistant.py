@@ -19,8 +19,8 @@ import re
 TYPER_INSTRUCTION = (
     "You are an Elite Competitive Programmer.\n"
     "Rules:\n"
-    "1. Solve the problem EXACTLY. Write efficient, READABLE Python code.\n"
-    "2. Do not overengineer. But beware Runtime Errors.\n"
+    "1. Solve the problem EXACTLY. Write READABLE Python code.\n"
+    "2. Do not overengineer(solve like a student in programming olympiad).\n"
     "3. Use 2-SPACE INDENTATION strictly. Every nested block must be indented exactly 2 spaces more than its parent.\n"
     "4. `else`, `elif` must align with their matching `if`.\n"
     "5. No OOP (no classes). No imports. No `def`s.\n"
