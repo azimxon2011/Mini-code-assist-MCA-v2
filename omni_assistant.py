@@ -142,10 +142,16 @@ def refresh_indicators():
 def loading_heartbeat():
     """Blinks indicators while loading_event is set."""
     while state.loading_event.is_set():
+        # Быстрое мигание (знак что процесс жив)
         set_leds(True, False, True)
-        time.sleep(0.35)
+        time.sleep(0.5)
         set_leds(False, False, False)
-        time.sleep(0.3)
+        
+        # Ожидание 5 секунд (разбито на мелкие шаги для быстрого выхода, если загрузка окончена)
+        for _ in range(50):
+            if not state.loading_event.is_set():
+                break
+            time.sleep(0.1)
     refresh_indicators()
 
 def get_screenshot():
