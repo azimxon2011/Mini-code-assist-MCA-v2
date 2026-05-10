@@ -14,6 +14,22 @@ from PIL import ImageGrab
 import tkinter as tk
 from tkinter import ttk, messagebox
 import re 
+import json
+
+# --- CONSTANTS ---
+DEFAULT_CPP_TEMPLATE = (
+    "#include <bits/stdc++.h>\n"
+    "using namespace std;\n\n"
+    "#define int long long\n"
+    "#define double long double\n\n"
+    "signed main() {\n"
+    "  ios::sync_with_stdio(0); cin.tie(0);\n"
+    "  // START\n"
+    "  \n"
+    "  // END\n"
+    "  return 0;\n"
+    "}"
+)
 
 # --- SYSTEM PROMPTS ---
 TYPER_INSTRUCTION = (
@@ -33,16 +49,20 @@ SOLVER_INSTRUCTION = (
     "Reason internally but Output ONLY the uppercase letter (A, B, C, or D). "
     "No text, no explanation. If there is answer marked already recheck it and output right answer."
 )
+#"2. Code should look like it was written by a normal human student, not a system engineer. Avoid overly complex syntax or obscure STL features unless necessary. Keep it simple and readable.\n"
 
+#"2. Code MUST look like it was written by a normal human student. No over-engineering, NO INPUT CHECKS (no if(cin>>...)), NO ALIGNMENT with spaces.\n"
 TYPER_CPP_INSTRUCTION = (
     "You are an Elite Competitive Programmer.\n"
     "Rules:\n"
     "1. Solve the problem EXACTLY. Write VERY CLEAR, UNDERSTANDABLE C++ code.\n"
-    "2. Code should look like it was written by a normal human student, not a system engineer. Avoid overly complex syntax, macros, or obscure STL features unless necessary. Keep it simple and readable.\n"
-    "3. Use 2-SPACE INDENTATION strictly.\n"
-    "4. Use `int main()` as the entry point.\n"
-    "5. Short but meaningful variable names related to the problem.\n"
-    "6. Return ONLY the raw code. No markdown, no explanations, no comments(also never leave comments in code)."
+    "2. Code should look like it was written by a normal human student in contest, not a system engineer or AI. AVOID overly complex syntax or obscure STL features unless necessary. Keep it simple and readable.\n"
+    "3. Use the provided template. You MUST wrap your logic with `// START` and `// END` markers. These are critical for the tool. DO NOT include any other comments in the code.\n"
+    "4. Use `#define int long long` and `signed main()` as per template.\n"
+    "5. Use 2-SPACE INDENTATION strictly.\n"
+    "6. Short but meaningful variable names related to the problem.\n"
+    "7. STUDENT HABITS: NEVER DO INPUT CHECKS. (e.g., `if (!(cin >> smth))`). NO vertical alignment with spaces. NO unnecessary intermediate variables or excessive casting. Use input variables directly in formulas.\n"
+    "8. Return ONLY the raw code. No markdown, no explanations, no comments (EXCEPT the START/END markers)."
 )
 
 # indicator states for Solver: (NumLock, CapsLock, ScrollLock)
@@ -75,9 +95,12 @@ class AssistantState:
         self.system_instr_typer = TYPER_INSTRUCTION
         self.system_instr_typer_cpp = TYPER_CPP_INSTRUCTION
         self.system_instr_solver = SOLVER_INSTRUCTION
+        self.cpp_template = DEFAULT_CPP_TEMPLATE
         
         # Typer Specific
         self.code_buffer = ""
+        self.prefix_buffer = ""
+        self.suffix_buffer = ""
         self.code_index = 0
         self.typing_active = False
         self.edit_mode = False
@@ -190,6 +213,11 @@ def adjust_for_autoindent(code):
             result.append('')
             continue
         target_indent = len(line) - len(line.lstrip(' '))
+        
+        # Prevent massive alignment jumps that break the typer
+        if target_indent > editor_indent + 4:
+            target_indent = editor_indent + 2
+            
         content = line.lstrip(' ')
         if target_indent < editor_indent:
             # Editor auto-indented too far; press backspace for each extra space
@@ -239,6 +267,7 @@ def open_settings_menu():
     typer_i = add_entry("Typer Instr", "system_instr_typer", True)
     typer_cpp_i = add_entry("Typer C++ Instr", "system_instr_typer_cpp", True)
     solver_i = add_entry("Solver Instr", "system_instr_solver", True)
+    cpp_temp_i = add_entry("C++ Template", "cpp_template", True)
 
     def on_apply():
         with state.lock:
@@ -249,6 +278,7 @@ def open_settings_menu():
             state.system_instr_typer = typer_i.get("1.0", tk.END).strip()
             state.system_instr_typer_cpp = typer_cpp_i.get("1.0", tk.END).strip()
             state.system_instr_solver = solver_i.get("1.0", tk.END).strip()
+            state.cpp_template = cpp_temp_i.get("1.0", tk.END).strip()
             genai.configure(api_key=state.api_key)
         log("Applied.")
         root.destroy()
@@ -264,11 +294,27 @@ def open_settings_menu():
 
 # --- TYPER LOGIC ---
 def type_one_char(ch):
-    if ch == '\n': keyboard.press_and_release('enter')
-    elif ch == '\t': keyboard.press_and_release('tab')
-    elif ch == '\x08': keyboard.press_and_release('backspace')
-    elif ch == ' ': keyboard.press_and_release('space')
-    else: keyboard.write(ch)
+    if ch == '\x1b[A': # Special marker for Arrow Up
+        keyboard.press_and_release('up')
+        return
+
+    if len(ch) > 1:
+        parts = re.split(r'([\n\t\x08 ])', ch)
+        for p in parts:
+            if not p: continue
+            if p == '\n': 
+                keyboard.press_and_release('enter')
+                time.sleep(0.02)  # Give editor time to auto-indent before potential backspaces
+            elif p == '\t': keyboard.press_and_release('tab')
+            elif p == '\x08': keyboard.press_and_release('backspace')
+            elif p == ' ': keyboard.press_and_release('space')
+            else: keyboard.write(p)
+    else:
+        if ch == '\n': keyboard.press_and_release('enter')
+        elif ch == '\t': keyboard.press_and_release('tab')
+        elif ch == '\x08': keyboard.press_and_release('backspace')
+        elif ch == ' ': keyboard.press_and_release('space')
+        else: keyboard.write(ch)
 
 import queue
 typing_queue = queue.Queue()
@@ -285,19 +331,24 @@ threading.Thread(target=typing_worker, daemon=True).start()
 def on_typing_key(event):
     is_down = event.event_type == keyboard.KEY_DOWN
     
-    # Handled Keys first (Esc, F8, F9, Ctrl+I, Backspace)
-    if event.name == 'f8':
-        if is_down:
+    # Ignore modifier and lock keys to prevent ghost triggers
+    if event.name in ('shift', 'ctrl', 'alt', 'left shift', 'right shift', 
+                     'left ctrl', 'right ctrl', 'left alt', 'right alt',
+                     'num lock', 'scroll lock', 'caps lock', 'f8', 'f9',
+                     'up', 'down', 'left', 'right', 'home', 'end', 'page up', 'page down'):
+        
+        # Still need to handle mode switch (F9) and edit mode (F8)
+        if event.name == 'f8' and is_down:
             state.edit_mode = not state.edit_mode
             log(f"Edit Mode: {'ON' if state.edit_mode else 'OFF'}")
-        return False
-    if state.edit_mode: return True
-    
-    if event.name == 'f9':
-        if is_down:
+            return False
+        if event.name == 'f9' and is_down:
             stop_typing_mode("Mode switch requested.")
             toggle_mode()
-        return False
+            return False
+        return True # Let the system handle these keys
+    
+    if state.edit_mode: return True
 
     if event.name == 'i' and (keyboard.is_pressed('ctrl') or keyboard.is_pressed('left ctrl')):
         if is_down:
@@ -318,15 +369,28 @@ def on_typing_key(event):
     # Typer Trigger
     if is_down:
         with state.lock:
-            if not state.typing_active or state.code_index >= len(state.code_buffer):
-                if state.code_index >= len(state.code_buffer) and state.typing_active:
-                    stop_typing_mode("Done typing!")
+            if not state.typing_active: return False
+            
+            # First keypress: Insert Full Template (Prefix + Suffix) and Move Cursor
+            if state.code_index == 0 and (state.prefix_buffer or state.suffix_buffer):
+                full_boilerplate = state.prefix_buffer + state.suffix_buffer
+                typing_queue.put(full_boilerplate)
+                
+                # Manual navigation requested: cursor stays at the end of boilerplate
+                
+                state.prefix_buffer = "" 
+                state.suffix_buffer = "" # Both already handled
                 return False
+
+            if state.code_index >= len(state.code_buffer):
+                stop_typing_mode("Done typing!")
+                return False
+
             ch = state.code_buffer[state.code_index]
             state.code_index += 1
-            # log(f"Trigger: '{event.name}' -> Char: '{ch}'")
+        
         typing_queue.put(ch)
-    return False # Strict suppression of ALL other keys
+    return False
     
 
 def start_typing_mode():
@@ -368,9 +432,14 @@ def handle_typer_action(model_name=None):
         if img:
             img_data = img_to_bytes(img)
             log(f"Typing ({lang_str}): Capture taken. Asking Gemini ({model_name})...")
+            
+            prompt = f"Solve this Robocontest problem and return the {lang_str} code. (Environment: {env_str})"
+            if is_cpp:
+                prompt += f"\n\nUse this template:\n{state.cpp_template}"
+            
             gen_model = genai.GenerativeModel(model_name=model_name, system_instruction=system_instr)
             response = gen_model.generate_content([
-                f"Solve this Robocontest problem and return the {lang_str} code. (Environment: {env_str})", 
+                prompt, 
                 {"inline_data": {"mime_type": "image/png", "data": base64.b64encode(img_data).decode()}}
             ])
             if state.cancel_event.is_set() or state.request_id != my_req_id:
@@ -379,10 +448,23 @@ def handle_typer_action(model_name=None):
             code = adjust_for_autoindent(strip_markdown(response.text))
              
             with state.lock:
-                state.code_buffer = code
+                # Split code by markers
+                if "// START" in code and "// END" in code:
+                    parts = code.split("// START")
+                    state.prefix_buffer = parts[0].strip() + "\n"
+                    
+                    logic_and_suffix = parts[1].split("// END")
+                    state.code_buffer = logic_and_suffix[0].strip()
+                    state.suffix_buffer = "\n" + logic_and_suffix[1].strip()
+                else:
+                    # Fallback if AI forgot markers
+                    state.prefix_buffer = ""
+                    state.code_buffer = code
+                    state.suffix_buffer = ""
+                
                 state.code_index = 0
                 state.typing_active = True
-            log(f"Ready! {len(code)} chars. Switch to editor.")
+            log(f"Ready! Logic: {len(state.code_buffer)} chars. Prefix: {len(state.prefix_buffer)} chars.")
             start_typing_mode()
     except Exception as e:
         log(f"Typer Error: {e}", "ERROR")
@@ -502,9 +584,25 @@ def on_global_hotkey(event):
         threading.Thread(target=open_settings_menu, daemon=True).start()
         return
 
+    # Instant Template Dump (F10) - Now triggers Typer mode
+    if event.name == 'f10' and is_down:
+        if state.typing_active or state.busy: return
+        log("F10: Loading template into Typer...")
+        clean_template = state.cpp_template.replace("// START", "").replace("// END", "")
+        adjusted_template = adjust_for_autoindent(clean_template)
+        with state.lock:
+            state.code_buffer = adjusted_template
+            state.prefix_buffer = ""
+            state.suffix_buffer = ""
+            state.code_index = 0
+            state.typing_active = True
+        start_typing_mode()
+        return
+
 def main():
     log("=== OMNI ASSISTANT MONOLITH ===")
     log("F9            : Switch Mode (Solver -> Typer_Python -> Typer_CPP)")
+    log("F10            : Load Template into Typer (Type it manually)")
     log("RightShift    : Capture & Execute Action (Hold for 0.5 seconds)")
     log("Default Mode  : SOLVER")
     log("Indicators    : Loading=Num+Scroll blink | Idle Solver=Caps | Idle Py=Num | Idle C++=Scroll")
