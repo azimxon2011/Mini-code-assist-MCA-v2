@@ -9,6 +9,7 @@ import keyboard
 import ctypes
 import win32api
 import win32con
+import win32clipboard
 import google.generativeai as genai
 from PIL import ImageGrab
 import tkinter as tk
@@ -39,6 +40,7 @@ SECOND_CPP_TEMPLATE = (
     "// START\n"
     "  \n"
     "// END\n"
+    "  return 0;\n"
     "}"
 )
 
@@ -317,7 +319,7 @@ def type_one_char(ch):
             if not p: continue
             if p == '\n': 
                 keyboard.press_and_release('enter')
-                time.sleep(0.02)  # Give editor time to auto-indent before potential backspaces
+                time.sleep(0.01)  # Faster but still safe
             elif p == '\t': keyboard.press_and_release('tab')
             elif p == '\x08': keyboard.press_and_release('backspace')
             elif p == ' ': keyboard.press_and_release('space')
@@ -329,6 +331,43 @@ def type_one_char(ch):
         elif ch == ' ': keyboard.press_and_release('space')
         else: keyboard.write(ch)
 
+def clipboard_paste(text):
+    """Pastes text via clipboard, preserving original clipboard content."""
+    old_data = None
+    try:
+        win32clipboard.OpenClipboard()
+        if win32clipboard.IsClipboardFormatAvailable(win32clipboard.CF_UNICODETEXT):
+            old_data = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
+        win32clipboard.CloseClipboard()
+    except Exception: pass
+
+    try:
+        # Remove any backspace markers for clipboard pasting
+        clean_text = text.replace('\x08', '')
+        win32clipboard.OpenClipboard()
+        win32clipboard.EmptyClipboard()
+        win32clipboard.SetClipboardText(clean_text, win32clipboard.CF_UNICODETEXT)
+        win32clipboard.CloseClipboard()
+        
+        keyboard.press('ctrl')
+        keyboard.press('v')
+        time.sleep(0.01)
+        keyboard.release('v')
+        keyboard.release('ctrl')
+        time.sleep(0.1) # Wait for editor to process
+    except Exception as e:
+        log(f"Clipboard paste error: {e}", "WARN")
+        keyboard.write(text)
+
+    if old_data is not None:
+        try:
+            time.sleep(0.05)
+            win32clipboard.OpenClipboard()
+            win32clipboard.EmptyClipboard()
+            win32clipboard.SetClipboardText(old_data, win32clipboard.CF_UNICODETEXT)
+            win32clipboard.CloseClipboard()
+        except Exception: pass
+
 import queue
 typing_queue = queue.Queue()
 
@@ -336,7 +375,10 @@ def typing_worker():
     while True:
         ch = typing_queue.get()
         if ch is None: break
-        type_one_char(ch)
+        if isinstance(ch, tuple) and ch[0] == 'PASTE':
+            clipboard_paste(ch[1])
+        else:
+            type_one_char(ch)
         typing_queue.task_done()
 
 threading.Thread(target=typing_worker, daemon=True).start()
@@ -387,7 +429,7 @@ def on_typing_key(event):
             # First keypress: Insert Full Template (Prefix + Suffix) and Move Cursor
             if state.code_index == 0 and (state.prefix_buffer or state.suffix_buffer):
                 full_boilerplate = state.prefix_buffer + state.suffix_buffer
-                typing_queue.put(full_boilerplate)
+                typing_queue.put(('PASTE', full_boilerplate))
                 
                 # Manual navigation requested: cursor stays at the end of boilerplate
                 
@@ -419,6 +461,23 @@ def stop_typing_mode(reason=""):
         state.typing_hook = None
     if reason: log(reason)
     refresh_indicators()
+
+def load_code_to_typer(code):
+    """Parses code with markers and loads into buffers."""
+    if "// START" in code and "// END" in code:
+        parts = code.split("// START")
+        state.prefix_buffer = parts[0]
+        
+        logic_and_suffix = parts[1].split("// END")
+        state.code_buffer = logic_and_suffix[0]
+        state.suffix_buffer = logic_and_suffix[1]
+    else:
+        state.prefix_buffer = ""
+        state.code_buffer = code
+        state.suffix_buffer = ""
+    
+    state.code_index = 0
+    state.typing_active = True
 
 # --- ACTION HANDLERS ---
 def handle_typer_action(model_name=None):
@@ -461,22 +520,8 @@ def handle_typer_action(model_name=None):
             code = adjust_for_autoindent(strip_markdown(response.text))
              
             with state.lock:
-                # Split code by markers
-                if "// START" in code and "// END" in code:
-                    parts = code.split("// START")
-                    state.prefix_buffer = parts[0].strip() + "\n"
-                    
-                    logic_and_suffix = parts[1].split("// END")
-                    state.code_buffer = logic_and_suffix[0].strip()
-                    state.suffix_buffer = "\n" + logic_and_suffix[1].strip()
-                else:
-                    # Fallback if AI forgot markers
-                    state.prefix_buffer = ""
-                    state.code_buffer = code
-                    state.suffix_buffer = ""
-                
-                state.code_index = 0
-                state.typing_active = True
+                load_code_to_typer(code)
+            
             log(f"Ready! Logic: {len(state.code_buffer)} chars. Prefix: {len(state.prefix_buffer)} chars.")
             start_typing_mode()
     except Exception as e:
@@ -616,13 +661,14 @@ def on_global_hotkey(event):
         threading.Thread(target=open_settings_menu, daemon=True).start()
         return
 
-    # Instant Template Dump (F10) - Now triggers Typer mode
+    # Instant Template Dump (F10) - Character-by-character mode
     if event.name == 'f10' and is_down:
         if state.typing_active or state.busy: return
-        log("F10: Loading template into Typer...")
-        clean_template = state.cpp_template.replace("// START", "").replace("// END", "")
-        adjusted_template = adjust_for_autoindent(clean_template)
+        log("F10: Loading template into Typer (Character-by-character mode)...")
         with state.lock:
+            # For F10, we put everything into code_buffer to force character-by-character typing
+            clean_template = state.cpp_template.replace("// START", "").replace("// END", "")
+            adjusted_template = adjust_for_autoindent(clean_template)
             state.code_buffer = adjusted_template
             state.prefix_buffer = ""
             state.suffix_buffer = ""
