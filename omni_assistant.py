@@ -462,18 +462,24 @@ def stop_typing_mode(reason=""):
     if reason: log(reason)
     refresh_indicators()
 
-def load_code_to_typer(code):
+def load_code_to_typer(clean_code, adjusted_code):
     """Parses code with markers and loads into buffers."""
-    if "// START" in code and "// END" in code:
-        parts = code.split("// START")
-        state.prefix_buffer = parts[0]
+    if "// START" in clean_code and "// END" in clean_code:
+        # Use ORIGINAL (clean) code for the boilerplate (prefix/suffix)
+        # because clipboard paste doesn't trigger auto-indent.
+        clean_parts = clean_code.split("// START")
+        clean_logic_suffix = clean_parts[1].split("// END")
+        state.prefix_buffer = clean_parts[0]
+        state.suffix_buffer = clean_logic_suffix[1]
         
-        logic_and_suffix = parts[1].split("// END")
-        state.code_buffer = logic_and_suffix[0]
-        state.suffix_buffer = logic_and_suffix[1]
+        # Use ADJUSTED code for the logic buffer
+        # because it's typed character-by-character.
+        adj_parts = adjusted_code.split("// START")
+        adj_logic_suffix = adj_parts[1].split("// END")
+        state.code_buffer = adj_logic_suffix[0]
     else:
         state.prefix_buffer = ""
-        state.code_buffer = code
+        state.code_buffer = adjusted_code
         state.suffix_buffer = ""
     
     state.code_index = 0
@@ -517,10 +523,12 @@ def handle_typer_action(model_name=None):
             if state.cancel_event.is_set() or state.request_id != my_req_id:
                 log("Typing request cancelled. Ignoring late Gemini response.")
                 return
-            code = adjust_for_autoindent(strip_markdown(response.text))
+            
+            clean_code = strip_markdown(response.text)
+            adjusted_code = adjust_for_autoindent(clean_code)
              
             with state.lock:
-                load_code_to_typer(code)
+                load_code_to_typer(clean_code, adjusted_code)
             
             log(f"Ready! Logic: {len(state.code_buffer)} chars. Prefix: {len(state.prefix_buffer)} chars.")
             start_typing_mode()
