@@ -674,8 +674,8 @@ def on_global_hotkey(event):
         if state.typing_active or state.busy: return
         log("F10: Loading template into Typer (Character-by-character mode)...")
         with state.lock:
-            # For F10, we put everything into code_buffer to force character-by-character typing
-            clean_template = state.cpp_template.replace("// START", "").replace("// END", "")
+            # For F10, we remove marker lines entirely to avoid extra empty lines
+            clean_template = re.sub(r'[ \t]*// (START|END)[ \t]*\n?', '', state.cpp_template)
             adjusted_template = adjust_for_autoindent(clean_template)
             state.code_buffer = adjusted_template
             state.prefix_buffer = ""
