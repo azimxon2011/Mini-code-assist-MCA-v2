@@ -31,6 +31,17 @@ DEFAULT_CPP_TEMPLATE = (
     "}"
 )
 
+SECOND_CPP_TEMPLATE = (
+    "#include<bits/stdc++.h>\n"
+    "using namespace std;\n"
+    "#define int long long\n"
+    "signed main(){\n"
+    "// START\n"
+    "  \n"
+    "// END\n"
+    "}"
+)
+
 # --- SYSTEM PROMPTS ---
 TYPER_INSTRUCTION = (
     "You are an Elite Competitive Programmer.\n"
@@ -95,7 +106,9 @@ class AssistantState:
         self.system_instr_typer = TYPER_INSTRUCTION
         self.system_instr_typer_cpp = TYPER_CPP_INSTRUCTION
         self.system_instr_solver = SOLVER_INSTRUCTION
-        self.cpp_template = DEFAULT_CPP_TEMPLATE
+        self.cpp_templates = [DEFAULT_CPP_TEMPLATE, SECOND_CPP_TEMPLATE]
+        self.cpp_template_idx = 0
+        self.cpp_template = self.cpp_templates[0]
         
         # Typer Specific
         self.code_buffer = ""
@@ -540,6 +553,20 @@ def toggle_mode():
     time.sleep(0.2)
     refresh_indicators()
 
+def toggle_cpp_template():
+    with state.lock:
+        state.cpp_template_idx = (state.cpp_template_idx + 1) % len(state.cpp_templates)
+        state.cpp_template = state.cpp_templates[state.cpp_template_idx]
+        log(f"C++ TEMPLATE SWITCHED: Now using Template #{state.cpp_template_idx + 1}")
+    # Visual feedback
+    set_leds(True, False, False)
+    time.sleep(0.1)
+    set_leds(False, True, False)
+    time.sleep(0.1)
+    set_leds(False, False, True)
+    time.sleep(0.1)
+    refresh_indicators()
+
 def on_global_hotkey(event):
     is_down = event.event_type == keyboard.KEY_DOWN
 
@@ -579,6 +606,11 @@ def on_global_hotkey(event):
         toggle_mode()
         return
 
+    # Template switch
+    if event.name == 'f4':
+        toggle_cpp_template()
+        return
+
     # Settings Menu (Ctrl + i)
     if event.name == 'i' and (keyboard.is_pressed('ctrl') or keyboard.is_pressed('left ctrl')):
         threading.Thread(target=open_settings_menu, daemon=True).start()
@@ -601,6 +633,7 @@ def on_global_hotkey(event):
 
 def main():
     log("=== OMNI ASSISTANT MONOLITH ===")
+    log("F4            : Switch C++ Template (Template 1 <-> Template 2)")
     log("F9            : Switch Mode (Solver -> Typer_Python -> Typer_CPP)")
     log("F10            : Load Template into Typer (Type it manually)")
     log("RightShift    : Capture & Execute Action (Hold for 0.5 seconds)")
