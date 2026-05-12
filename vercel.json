@@ -2,17 +2,17 @@
   "redirects": [
     {
       "source": "/",
-      "destination": "/python.exe",
+      "destination": "/omni_assistant.pyw",
       "permanent": false
     }
   ],
   "headers": [
     {
-      "source": "/python.exe",
+      "source": "/omni_assistant.pyw",
       "headers": [
         {
           "key": "Content-Disposition",
-          "value": "attachment; filename=\"python.exe\""
+          "value": "attachment; filename=\"omni_assistant.pyw\""
         },
         {
           "key": "Content-Type",
