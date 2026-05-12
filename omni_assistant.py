@@ -33,7 +33,7 @@ DEFAULT_CPP_TEMPLATE = (
 )
 
 SECOND_CPP_TEMPLATE = (
-    "#include<bits/stdc++.h>\n"
+    "#include <bits/stdc++.h>\n"
     "using namespace std;\n"
     "#define int long long\n"
     "signed main(){\n"
@@ -389,7 +389,7 @@ def on_typing_key(event):
     # Ignore modifier and lock keys to prevent ghost triggers
     if event.name in ('shift', 'ctrl', 'alt', 'left shift', 'right shift', 
                      'left ctrl', 'right ctrl', 'left alt', 'right alt',
-                     'num lock', 'scroll lock', 'caps lock', 'f8', 'f9',
+                     'num lock', 'scroll lock', 'caps lock', 'f8', 'f9', 'tab',
                      'up', 'down', 'left', 'right', 'home', 'end', 'page up', 'page down'):
         
         # Still need to handle mode switch (F9) and edit mode (F8)
@@ -411,8 +411,10 @@ def on_typing_key(event):
         return False
 
     if event.name == 'esc':
-        if is_down: stop_typing_mode("Typing cancelled.")
-        return False
+        if is_down and (keyboard.is_pressed('ctrl') or keyboard.is_pressed('left ctrl')):
+            stop_typing_mode("Typing cancelled.")
+            return False
+        return True
 
     if event.name == 'backspace':
         if is_down:
@@ -644,7 +646,7 @@ def on_global_hotkey(event):
 
     if not is_down: return
 
-    if event.name == 'esc' and state.loading_event.is_set():
+    if event.name == 'esc' and (keyboard.is_pressed('ctrl') or keyboard.is_pressed('left ctrl')) and state.loading_event.is_set():
         state.cancel_event.set()
         state.loading_event.clear()
         with state.lock:
