@@ -5,3 +5,8 @@ temp_build
 dist
 build
 *.spec
+build_temp
+temp_build
+venv
+.vscode
+.omni_venv

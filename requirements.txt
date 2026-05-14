@@ -1,0 +1,6 @@
+google-generativeai
+pillow
+keyboard
+mss
+pyperclip
+pyinstaller
