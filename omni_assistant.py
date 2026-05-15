@@ -77,21 +77,6 @@ TYPER_CPP_INSTRUCTION = (
     "6. Return ONLY the raw code. No markdown, no explanations, no comments(also never leave comments in code)."
 )
 
-# indicator states for Solver: (NumLock, CapsLock, ScrollLock)
-INDICATOR_MAP = {
-    "A": (True,  False, False),
-    "B": (False, True,  False),
-    "C": (False, False, True),
-    "D": (True,  True,  True),
-    "?": (False, False, False),
-}
-
-MODE_INDICATOR_MAP = {
-    "SOLVER": (False, True, False),
-    "TYPER_PYTHON": (True, False, False),
-    "TYPER_CPP": (False, False, True),
-}
-
 # --- STATE ---
 class AssistantState:
     def __init__(self):
@@ -118,7 +103,6 @@ class AssistantState:
         # Solver Specific
         self.last_img_hash = None
         self.last_letter = "?"
-        self.last_solver_indicator_until = 0.0
         
         # Global
         self.loading_event = threading.Event()
@@ -144,44 +128,10 @@ except:
 
 import win32gui
 
-# --- VIRTUAL KEYS ---
-VK_NUM = 0x90
-VK_CAPS = 0x14
-VK_SCROLL = 0x91
 # --- UTILITIES ---
 def log(msg, level="INFO"):
     ts = time.strftime("%H:%M:%S")
     print(f"[{ts}] [{level}] {msg}", flush=True)
-
-def get_toggle_state(vk_code: int) -> bool:
-    return (win32api.GetKeyState(vk_code) & 1) != 0
-
-def press_key(vk_code: int):
-    win32api.keybd_event(vk_code, 0, 0, 0)
-    time.sleep(0.01)
-    win32api.keybd_event(vk_code, 0, win32con.KEYEVENTF_KEYUP, 0)
-
-def set_leds(num=None, caps=None, scroll=None):
-    """Sets keyboard LEDs to requested states (None means keep current)."""
-    if num is not None and get_toggle_state(VK_NUM) != num:
-        press_key(VK_NUM)
-    if caps is not None and get_toggle_state(VK_CAPS) != caps:
-        press_key(VK_CAPS)
-    if scroll is not None and get_toggle_state(VK_SCROLL) != scroll:
-        press_key(VK_SCROLL)
-
-def get_indicator_state():
-    now = time.time()
-    if state.typing_active:
-        return (True, False, True)
-    if state.mode == "SOLVER" and now < state.last_solver_indicator_until:
-        return INDICATOR_MAP.get(state.last_letter, INDICATOR_MAP["?"])
-    return MODE_INDICATOR_MAP.get(state.mode, (False, False, False))
-
-def refresh_indicators():
-    if state.loading_event.is_set():
-        return
-    set_leds(*get_indicator_state())
 
 def loading_heartbeat():
     """Blinks indicators or animates mouse while loading_event is set."""
@@ -198,17 +148,7 @@ def loading_heartbeat():
             log(f"Cursor error: {e}", "WARN")
         
     while state.loading_event.is_set():
-        if is_solver:
-            time.sleep(0.1)
-        else:
-            # Быстрое мигание для Typer
-            set_leds(True, False, True)
-            time.sleep(0.5)
-            set_leds(False, False, False)
-            for _ in range(50):
-                if not state.loading_event.is_set():
-                    break
-                time.sleep(0.1)
+        time.sleep(0.1)
 
     if is_solver:
         try:
@@ -216,8 +156,6 @@ def loading_heartbeat():
             ctypes.windll.user32.SystemParametersInfoW(SPI_SETCURSORS, 0, None, 0)
         except Exception:
             pass
-
-    refresh_indicators()
 
 def get_screenshot(active_only=True):
     try:
@@ -415,7 +353,6 @@ def start_typing_mode():
     if state.typing_hook is None:
         state.typing_hook = keyboard.hook(on_typing_key, suppress=True)
     log("Typing ACTIVE - Press ANY key to type code.")
-    refresh_indicators()
 
 def stop_typing_mode(reason=""):
     state.typing_active = False
@@ -423,7 +360,6 @@ def stop_typing_mode(reason=""):
         keyboard.unhook(state.typing_hook)
         state.typing_hook = None
     if reason: log(reason)
-    refresh_indicators()
 
 # --- ACTION HANDLERS ---
 def handle_typer_action(model_name=None):
@@ -473,7 +409,6 @@ def handle_typer_action(model_name=None):
             if state.request_id == my_req_id:
                 state.loading_event.clear()
                 state.busy = False
-                refresh_indicators()
 
 def handle_solver_action():
     with state.lock:
@@ -495,8 +430,6 @@ def handle_solver_action():
         if curr_hash == state.last_img_hash:
             ans = state.last_letter
             log(f"Solver: Same image. Answer: {ans}")
-            state.last_solver_indicator_until = time.time() + 8
-            refresh_indicators()
             return
 
         state.loading_event.set()
@@ -529,23 +462,37 @@ def handle_solver_action():
             
             if state.cancel_event.is_set(): return
 
-            # Smoothly move to target
-            cur_x, cur_y = win32api.GetCursorPos()
-            steps = 6
-            for i in range(steps):
-                if state.cancel_event.is_set(): return
-                mx = cur_x + (tx - cur_x) * (i + 1) // steps
-                my = cur_y + (ty - cur_y) * (i + 1) // steps
-                win32api.SetCursorPos((mx, my))
-                time.sleep(0.01)
+            # Move towards target and keep trying to return for 2 seconds
+            start_pull = time.time()
+            click_done = False
             
-            if state.cancel_event.is_set(): return
-            win32api.SetCursorPos((tx, ty))
-            time.sleep(0.05)
-            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-            time.sleep(0.05)
-            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-            log("Solver: Clicked.")
+            while time.time() - start_pull < 2.0:
+                if state.cancel_event.is_set(): return
+                
+                cur_x, cur_y = win32api.GetCursorPos()
+                
+                # Smooth approach factor
+                factor = 0.15 
+                mx = cur_x + int((tx - cur_x) * factor)
+                my = cur_y + int((ty - cur_y) * factor)
+                
+                # Prevent getting stuck just 1-2 pixels away
+                if abs(tx - cur_x) <= 2: mx = tx
+                if abs(ty - cur_y) <= 2: my = ty
+                
+                win32api.SetCursorPos((mx, my))
+                
+                dist = math.hypot(tx - cur_x, ty - cur_y)
+                if dist < 5 and not click_done:
+                    win32api.SetCursorPos((tx, ty))
+                    time.sleep(0.01)
+                    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+                    time.sleep(0.02)
+                    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+                    log("Solver: Clicked.")
+                    click_done = True
+                
+                time.sleep(0.01)
         else:
             ans = text[:1]
             if ans not in "ABCD": ans = "?"
@@ -553,8 +500,6 @@ def handle_solver_action():
 
         state.last_img_hash = curr_hash
         state.last_letter = ans
-        state.last_solver_indicator_until = time.time() + 8
-        refresh_indicators()
         
     except Exception as e:
         log(f"Solver Error: {e}", "ERROR")
@@ -563,7 +508,6 @@ def handle_solver_action():
             if state.request_id == my_req_id:
                 state.loading_event.clear()
                 state.busy = False
-                refresh_indicators()
 
 def toggle_mode():
     with state.lock:
@@ -574,9 +518,6 @@ def toggle_mode():
         else:
             state.mode = "SOLVER"
         log(f"MODE SWITCHED: Now in {state.mode} mode.")
-    set_leds(True, True, True)
-    time.sleep(0.2)
-    refresh_indicators()
 
 def on_global_hotkey(event):
     is_down = event.event_type == keyboard.KEY_DOWN
@@ -616,7 +557,6 @@ def on_global_hotkey(event):
             state.busy = False
             state.request_id += 1
         log("!!! CANCELLED !!! Ready.")
-        refresh_indicators()
         return
     
     # Mode switch
@@ -634,10 +574,7 @@ def main():
     log("F9            : Switch Mode (Solver -> Typer_Python -> Typer_CPP)")
     log("RightShift    : Capture & Execute Action (Hold for 0.5 seconds)")
     log("Default Mode  : SOLVER")
-    log("Indicators    : Loading=Num+Scroll blink | Idle Solver=Caps | Idle Py=Num | Idle C++=Scroll")
-    log("Indicators    : Typing ready=Num+Scroll | Solver answer shown for 8s")
     log("-------------------------------")
-    refresh_indicators()
     
     keyboard.hook(on_global_hotkey)
     
