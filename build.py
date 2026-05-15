@@ -33,13 +33,13 @@ def main():
     
     # 3. Install Dependencies
     log("Installing dependencies...")
-    run([pip_exe, "install", "--upgrade", "pip", "setuptools", "wheel"])
+    run([python_exe, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"])
     
     req_file = os.path.join(project_root, "requirements.txt")
-    run([pip_exe, "install", "-r", req_file])
+    run([python_exe, "-m", "pip", "install", "-r", req_file])
     
     if sys.platform == "win32":
-        run([pip_exe, "install", "pywin32"])
+        run([python_exe, "-m", "pip", "install", "pywin32"])
     
     # 4. Run PyInstaller
     log(f"Building {target_script}...")
@@ -50,7 +50,7 @@ def main():
     # Clean old builds
     for d in [dist_path, build_path]:
         if os.path.exists(d):
-            shutil.rmtree(d)
+            shutil.rmtree(d, ignore_errors=True)
 
     cmd = [
         pyinstaller_exe,
@@ -70,7 +70,23 @@ def main():
         
     run(cmd)
     
-    log("Build complete! Check the 'dist' folder.")
+    # Move and rename executable to root
+    build_exe_name = "omni_assistant.exe" if sys.platform == "win32" else "omni_assistant"
+    final_exe_name = "python.exe" if sys.platform == "win32" else "python"
+    src_exe = os.path.join(dist_path, build_exe_name)
+    dst_exe = os.path.join(project_root, final_exe_name)
+    
+    if os.path.exists(dst_exe):
+        try:
+            os.remove(dst_exe)
+        except Exception as e:
+            log(f"Warning: Could not remove {dst_exe}: {e}")
+
+    if os.path.exists(src_exe):
+        shutil.copy2(src_exe, dst_exe)
+        log(f"Copied and renamed to {final_exe_name} at root folder.")
+    
+    log("Build complete! Check the 'dist' folder or project root.")
 
 if __name__ == "__main__":
     main()

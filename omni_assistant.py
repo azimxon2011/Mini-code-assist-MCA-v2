@@ -189,30 +189,17 @@ def loading_heartbeat():
     
     if is_solver:
         try:
-            orig_pos = win32api.GetCursorPos()
-        except Exception:
-            orig_pos = (960, 540)
-        angle = 0.0
-        radius = 20
+            OCR_NORMAL = 32512
+            OCR_APPSTARTING = 32650
+            hWaitCursor = ctypes.windll.user32.LoadCursorW(0, OCR_APPSTARTING)
+            hCursorCopy = ctypes.windll.user32.CopyIcon(hWaitCursor)
+            ctypes.windll.user32.SetSystemCursor(hCursorCopy, OCR_NORMAL)
+        except Exception as e:
+            log(f"Cursor error: {e}", "WARN")
         
     while state.loading_event.is_set():
         if is_solver:
-            # Circular mouse motion
-            try:
-                # Check if user moved mouse manually (approx check)
-                curr_pos = win32api.GetCursorPos()
-                ex = orig_pos[0] + int(radius * math.cos(angle - 0.2))
-                ey = orig_pos[1] + int(radius * math.sin(angle - 0.2))
-                if abs(curr_pos[0] - ex) > 40 or abs(curr_pos[1] - ey) > 40:
-                    orig_pos = curr_pos
-                
-                new_x = orig_pos[0] + int(radius * math.cos(angle))
-                new_y = orig_pos[1] + int(radius * math.sin(angle))
-                win32api.SetCursorPos((new_x, new_y))
-                angle += 0.2
-                time.sleep(0.01)
-            except Exception:
-                time.sleep(0.1)
+            time.sleep(0.1)
         else:
             # Быстрое мигание для Typer
             set_leds(True, False, True)
@@ -222,6 +209,14 @@ def loading_heartbeat():
                 if not state.loading_event.is_set():
                     break
                 time.sleep(0.1)
+
+    if is_solver:
+        try:
+            SPI_SETCURSORS = 0x0057
+            ctypes.windll.user32.SystemParametersInfoW(SPI_SETCURSORS, 0, None, 0)
+        except Exception:
+            pass
+
     refresh_indicators()
 
 def get_screenshot(active_only=True):
