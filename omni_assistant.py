@@ -587,6 +587,13 @@ def on_global_hotkey(event):
         if is_down:
             if state.rshift_timer is None:
                 def trigger():
+                    with state.lock:
+                        if state.busy:
+                            log("Restarting request (interrupted by user)...")
+                            state.cancel_event.set()
+                            state.busy = False
+                            state.request_id += 1
+
                     if state.mode == "SOLVER":
                         threading.Thread(target=handle_solver_action, daemon=True).start()
                     else:
