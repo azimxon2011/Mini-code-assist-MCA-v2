@@ -22,17 +22,34 @@ import os
 CONFIG_FILE = "config.json"
 
 DEFAULT_CONFIG = {
-    "api_key": "AIzaSyDze9Z5aCrxJR9G5YmpcpvNXOOeAgEmK6s",
-    "model_flash": "gemini-3-flash-preview",
-    "model_pro": "gemini-3.1-pro-preview",
-    "model_solver": "gemini-3-flash-preview",
+    "api_key_1": "AIzaSyAIBABOOlZS8aopLEgsPW9_9lWDivSTB_c",
+    "api_key_2": "AIzaSyBp_mHdzSh7FutWrNIJ-dJv7hTAFIoIrro",
+    "api_key_3": "AIzaSyBQtqv87aXYIQlJ55r_lwfJX5hfmvEckis",
+    "active_key_index": 1,
+    "model_flash": "gemini-3.1-flash-lite",
+    "model_pro": "gemini-3-flash-preview",
+    "model_solver": "gemini-3.1-flash-lite",
 }
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r") as f:
-                return json.load(f)
+                cfg = json.load(f)
+                # Backward compatibility: migrate old single api_key to api_key_1, 2, 3
+                if "api_key" in cfg and "api_key_1" not in cfg:
+                    cfg["api_key_1"] = cfg["api_key"]
+                    cfg["api_key_2"] = cfg["api_key"]
+                    cfg["api_key_3"] = cfg["api_key"]
+                    cfg["active_key_index"] = 1
+                # Migrate old model names to the new defaults
+                if cfg.get("model_flash") == "gemini-3-flash-preview":
+                    cfg["model_flash"] = "gemini-3.1-flash-lite"
+                if cfg.get("model_pro") == "gemini-3.1-pro-preview":
+                    cfg["model_pro"] = "gemini-3-flash-preview"
+                if cfg.get("model_solver") == "gemini-3-flash-preview":
+                    cfg["model_solver"] = "gemini-3.1-flash-lite"
+                return cfg
         except:
             return DEFAULT_CONFIG
     return DEFAULT_CONFIG
@@ -85,7 +102,14 @@ class AssistantState:
         self.lock = threading.Lock()
         
         # Configurable Settings
-        self.api_key = config_data.get("api_key", DEFAULT_CONFIG["api_key"])
+        # Backward compatibility for old configs that might be missing api_key_1, api_key_2, api_key_3
+        old_key = config_data.get("api_key", "AIzaSyDze9Z5aCrxJR9G5YmpcpvNXOOeAgEmK6s")
+        self.api_key_1 = config_data.get("api_key_1", old_key)
+        self.api_key_2 = config_data.get("api_key_2", old_key)
+        self.api_key_3 = config_data.get("api_key_3", old_key)
+        self.active_key_index = config_data.get("active_key_index", 1)
+        self.api_key = getattr(self, f"api_key_{self.active_key_index}")
+        
         self.model_flash = config_data.get("model_flash", DEFAULT_CONFIG["model_flash"])
         self.model_pro = config_data.get("model_pro", DEFAULT_CONFIG["model_pro"])
         self.model_solver = config_data.get("model_solver", DEFAULT_CONFIG["model_solver"])
@@ -110,11 +134,31 @@ class AssistantState:
         self.cancel_event = threading.Event()
         self.rshift_timer = None
         self.request_id = 0
+        self.error_cursor_active = False
+        self.error_cursor_id = 0
 
 state = AssistantState()
 
 # Initialize GenAI with default key
 genai.configure(api_key=state.api_key)
+
+def switch_api_key(index):
+    with state.lock:
+        if index not in (1, 2, 3):
+            return
+        state.active_key_index = index
+        state.api_key = getattr(state, f"api_key_{index}")
+        genai.configure(api_key=state.api_key)
+        
+        # Save to config.json
+        cfg = load_config()
+        cfg["active_key_index"] = index
+        cfg["api_key_1"] = state.api_key_1
+        cfg["api_key_2"] = state.api_key_2
+        cfg["api_key_3"] = state.api_key_3
+        save_config(cfg)
+        
+    log(f"Switched to API Key {index}: {state.api_key[:6]}...{state.api_key[-4:] if len(state.api_key) > 10 else ''}")
 
 # DPI Awareness for accurate mouse positioning
 # DPI Awareness
@@ -133,29 +177,78 @@ def log(msg, level="INFO"):
     ts = time.strftime("%H:%M:%S")
     print(f"[{ts}] [{level}] {msg}", flush=True)
 
+# --- CURSOR CACHING ---
+def init_cursors():
+    if not IS_WINDOWS: return
+    with state.lock:
+        if not hasattr(state, "h_normal_cache") or state.h_normal_cache is None:
+            try:
+                # Silently reset just for our process before caching, to ensure we get the real arrow
+                ctypes.windll.user32.SystemParametersInfoW(0x0057, 0, None, 0)
+            except: pass
+            
+            try:
+                OCR_NORMAL = 32512
+                OCR_APPSTARTING = 32650
+                OCR_NO = 32648
+                state.h_normal_cache = ctypes.windll.user32.CopyIcon(ctypes.windll.user32.LoadCursorW(0, OCR_NORMAL))
+                state.h_wait_cache = ctypes.windll.user32.CopyIcon(ctypes.windll.user32.LoadCursorW(0, OCR_APPSTARTING))
+                state.h_block_cache = ctypes.windll.user32.CopyIcon(ctypes.windll.user32.LoadCursorW(0, OCR_NO))
+            except: pass
+
+def set_system_cursor(cursor_type):
+    """Sets the system cursor (OCR_NORMAL) to one of our cached cursors."""
+    if not IS_WINDOWS: return
+    init_cursors()
+    try:
+        if cursor_type == "NORMAL" and getattr(state, "h_normal_cache", None):
+            h_copy = ctypes.windll.user32.CopyIcon(state.h_normal_cache)
+        elif cursor_type == "WAIT" and getattr(state, "h_wait_cache", None):
+            h_copy = ctypes.windll.user32.CopyIcon(state.h_wait_cache)
+        elif cursor_type == "BLOCK" and getattr(state, "h_block_cache", None):
+            h_copy = ctypes.windll.user32.CopyIcon(state.h_block_cache)
+        else:
+            return
+        ctypes.windll.user32.SetSystemCursor(h_copy, 32512)
+    except Exception as e:
+        log(f"SetSystemCursor failed: {e}", "WARN")
+
+def show_error_cursor():
+    """Sets system cursor to OCR_NO (block) for 2 seconds to indicate an error, then restores it."""
+    with state.lock:
+        state.error_cursor_id += 1
+        my_id = state.error_cursor_id
+        state.error_cursor_active = True
+
+    def worker():
+        try:
+            set_system_cursor("BLOCK")
+            time.sleep(2.0)
+            with state.lock:
+                if state.error_cursor_id == my_id:
+                    state.error_cursor_active = False
+                    set_system_cursor("NORMAL")
+        except Exception as e:
+            log(f"Failed to set error cursor: {e}", "WARN")
+            
+    threading.Thread(target=worker, daemon=True).start()
+
 def loading_heartbeat():
     """Blinks indicators or animates mouse while loading_event is set."""
     is_solver = (state.mode == "SOLVER")
     
     if is_solver:
-        try:
-            OCR_NORMAL = 32512
-            OCR_APPSTARTING = 32650
-            hWaitCursor = ctypes.windll.user32.LoadCursorW(0, OCR_APPSTARTING)
-            hCursorCopy = ctypes.windll.user32.CopyIcon(hWaitCursor)
-            ctypes.windll.user32.SetSystemCursor(hCursorCopy, OCR_NORMAL)
-        except Exception as e:
-            log(f"Cursor error: {e}", "WARN")
+        with state.lock:
+            state.error_cursor_id += 1
+            state.error_cursor_active = False
+        set_system_cursor("WAIT")
         
     while state.loading_event.is_set():
         time.sleep(0.1)
 
     if is_solver:
-        try:
-            SPI_SETCURSORS = 0x0057
-            ctypes.windll.user32.SystemParametersInfoW(SPI_SETCURSORS, 0, None, 0)
-        except Exception:
-            pass
+        if not getattr(state, "error_cursor_active", False):
+            set_system_cursor("NORMAL")
 
 def get_screenshot(active_only=True):
     try:
@@ -225,7 +318,7 @@ def open_settings_menu():
     
     root = tk.Tk()
     root.title("Settings")
-    root.geometry("400x550")
+    root.geometry("420x680")
     root.attributes('-topmost', True)
     
     main_frame = ttk.Frame(root, padding=10)
@@ -234,17 +327,27 @@ def open_settings_menu():
     def add_entry(label, var_name, is_text=False):
         ttk.Label(main_frame, text=label).pack(anchor=tk.W)
         if is_text:
-            widget = tk.Text(main_frame, height=4, width=40, font=("Consolas", 9))
+            widget = tk.Text(main_frame, height=3, width=40, font=("Consolas", 9))
             widget.insert("1.0", getattr(state, var_name))
-            widget.pack(fill=tk.X, pady=(0, 10))
+            widget.pack(fill=tk.X, pady=(0, 5))
             return widget
         else:
             widget = ttk.Entry(main_frame, width=40)
             widget.insert(0, getattr(state, var_name))
-            widget.pack(fill=tk.X, pady=(0, 10))
+            widget.pack(fill=tk.X, pady=(0, 5))
             return widget
 
-    key_e = add_entry("API Key", "api_key")
+    key1_e = add_entry("API Key 1 (Free tier)", "api_key_1")
+    key2_e = add_entry("API Key 2 (Free tier)", "api_key_2")
+    key3_e = add_entry("API Key 3 (Free tier)", "api_key_3")
+    
+    ttk.Label(main_frame, text="Active API Key").pack(anchor=tk.W)
+    active_key_var = tk.IntVar(value=state.active_key_index)
+    key_sel_frame = ttk.Frame(main_frame)
+    key_sel_frame.pack(fill=tk.X, pady=(0, 5))
+    for i in (1, 2, 3):
+        ttk.Radiobutton(key_sel_frame, text=f"Key {i}", variable=active_key_var, value=i).pack(side=tk.LEFT, padx=5)
+
     flash_e = add_entry("Flash Model", "model_flash")
     pro_e = add_entry("Pro Model", "model_pro")
     solve_model_e = add_entry("Solver Model", "model_solver")
@@ -254,7 +357,12 @@ def open_settings_menu():
 
     def on_apply():
         with state.lock:
-            state.api_key = key_e.get().strip()
+            state.api_key_1 = key1_e.get().strip()
+            state.api_key_2 = key2_e.get().strip()
+            state.api_key_3 = key3_e.get().strip()
+            state.active_key_index = active_key_var.get()
+            state.api_key = getattr(state, f"api_key_{state.active_key_index}")
+            
             state.model_flash = flash_e.get().strip()
             state.model_pro = pro_e.get().strip()
             state.model_solver = solve_model_e.get().strip()
@@ -263,14 +371,17 @@ def open_settings_menu():
             state.system_instr_solver = solver_i.get("1.0", tk.END).strip()
             
             save_config({
-                "api_key": state.api_key,
+                "api_key_1": state.api_key_1,
+                "api_key_2": state.api_key_2,
+                "api_key_3": state.api_key_3,
+                "active_key_index": state.active_key_index,
                 "model_flash": state.model_flash,
                 "model_pro": state.model_pro,
                 "model_solver": state.model_solver
             })
             
             genai.configure(api_key=state.api_key)
-        log("Applied and saved to config.json")
+        log(f"Applied and saved to config.json (Active Key {state.active_key_index})")
         root.destroy()
         state.menu_open = False
 
@@ -404,6 +515,7 @@ def handle_typer_action(model_name=None):
             start_typing_mode()
     except Exception as e:
         log(f"Typer Error: {e}", "ERROR")
+        show_error_cursor()
     finally:
         with state.lock:
             if state.request_id == my_req_id:
@@ -503,6 +615,7 @@ def handle_solver_action():
         
     except Exception as e:
         log(f"Solver Error: {e}", "ERROR")
+        show_error_cursor()
     finally:
         with state.lock:
             if state.request_id == my_req_id:
@@ -550,6 +663,12 @@ def on_global_hotkey(event):
 
     if not is_down: return
 
+    # API key switching hotkeys: Ctrl + 1, Ctrl + 2, Ctrl + 3
+    if (keyboard.is_pressed('ctrl') or keyboard.is_pressed('left ctrl')) and event.name in ('1', '2', '3'):
+        key_num = int(event.name)
+        switch_api_key(key_num)
+        return
+
     if event.name == 'esc' and state.loading_event.is_set():
         state.cancel_event.set()
         state.loading_event.clear()
@@ -572,6 +691,7 @@ def on_global_hotkey(event):
 def main():
     log("=== OMNI ASSISTANT MONOLITH ===")
     log("F9            : Switch Mode (Solver -> Typer_Python -> Typer_CPP)")
+    log("Ctrl+1/2/3    : Switch Active API Key (1, 2, or 3)")
     log("RightShift    : Capture & Execute Action (Hold for 0.5 seconds)")
     log("Default Mode  : SOLVER")
     log("-------------------------------")
