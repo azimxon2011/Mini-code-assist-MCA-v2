@@ -10,5 +10,6 @@ temp_build
 venv
 .vscode
 .omni_venv
+.venv-light
 omni_assistant_new.exe
 *.pkg

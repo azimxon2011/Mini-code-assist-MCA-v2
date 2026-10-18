@@ -1,4 +1,4 @@
-google-generativeai
+requests
 pillow
 keyboard
 mss

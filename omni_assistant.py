@@ -34,7 +34,39 @@ from tkinter import ttk, messagebox
 # Suppress deprecation warnings from libraries
 warnings.filterwarnings("ignore")
 
-import google.generativeai as genai
+def gemini_generate_content(api_key, model_name, system_instruction, prompt, image_b64=None):
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+        parts = []
+        if prompt:
+            parts.append({"text": prompt})
+        if image_b64:
+            parts.append({
+                "inline_data": {
+                    "mime_type": "image/png",
+                    "data": image_b64
+                }
+            })
+        payload = {
+            "contents": [{"parts": parts}]
+        }
+        if system_instruction:
+            payload["system_instruction"] = {
+                "parts": [{"text": system_instruction}]
+            }
+        headers = {"Content-Type": "application/json"}
+        resp = requests.post(url, headers=headers, json=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        candidates = data.get("candidates", [])
+        if candidates and "content" in candidates[0]:
+            text_parts = [p.get("text", "") for p in candidates[0]["content"].get("parts", [])]
+            return "".join(text_parts)
+    except Exception as e:
+        print(f"[Gemini REST API Error] {e}")
+        raise
+    return ""
+
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -227,21 +259,12 @@ class AssistantState:
 
 state = AssistantState()
 
-try:
-    genai.configure(api_key=state.api_key)
-except Exception:
-    pass
-
 def switch_api_key(index):
     with state.lock:
         if index not in (1, 2, 3):
             return
         state.active_key_index = index
         state.api_key = getattr(state, f"api_key_{index}")
-        try:
-            genai.configure(api_key=state.api_key)
-        except Exception:
-            pass
         
         cfg = load_config()
         cfg["active_key_index"] = index
@@ -472,11 +495,6 @@ def open_settings_menu():
                 "model_pro": state.model_pro,
                 "model_solver": state.model_solver
             })
-            
-            try:
-                genai.configure(api_key=state.api_key)
-            except Exception:
-                pass
         root.destroy()
         state.menu_open = False
 
@@ -587,14 +605,17 @@ def handle_typer_action(model_name=None):
         img, _ = get_screenshot(active_only=False)
         if img:
             img_data = img_to_bytes(img)
-            gen_model = genai.GenerativeModel(model_name=model_name, system_instruction=system_instr)
-            response = gen_model.generate_content([
-                f"Solve this Robocontest problem and return the {lang_str} code. (Environment: {env_str})", 
-                {"inline_data": {"mime_type": "image/png", "data": base64.b64encode(img_data).decode()}}
-            ])
+            b64_img = base64.b64encode(img_data).decode("utf-8")
+            res_text = gemini_generate_content(
+                api_key=state.api_key,
+                model_name=model_name,
+                system_instruction=system_instr,
+                prompt=f"Solve this Robocontest problem and return the {lang_str} code. (Environment: {env_str})",
+                image_b64=b64_img
+            )
             if state.cancel_event.is_set() or state.request_id != my_req_id:
                 return
-            code = adjust_for_autoindent(strip_markdown(response.text))
+            code = adjust_for_autoindent(strip_markdown(res_text))
              
             with state.lock:
                 state.code_buffer = code
@@ -635,15 +656,18 @@ def handle_solver_action():
         state.loading_event.set()
         threading.Thread(target=loading_heartbeat, daemon=True).start()
         
-        gen_model = genai.GenerativeModel(model_name=model_name, system_instruction=state.system_instr_solver)
-        response = gen_model.generate_content([
-            "Solve the question in this image. Provide the letter and coordinates.",
-            {"inline_data": {"mime_type": "image/png", "data": base64.b64encode(img_bytes).decode()}}
-        ])
+        b64_img = base64.b64encode(img_bytes).decode("utf-8")
+        res_text = gemini_generate_content(
+            api_key=state.api_key,
+            model_name=model_name,
+            system_instruction=state.system_instr_solver,
+            prompt="Solve the question in this image. Provide the letter and coordinates.",
+            image_b64=b64_img
+        )
         if state.cancel_event.is_set() or state.request_id != my_req_id:
             return
         
-        text = response.text.strip().upper()
+        text = res_text.strip().upper()
         match = re.search(r"([A-D])\s*\[(\d+),\s*(\d+)\]", text)
         
         if match:
