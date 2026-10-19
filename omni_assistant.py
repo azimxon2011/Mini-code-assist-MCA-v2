@@ -215,6 +215,7 @@ class AssistantState:
         self.target_logins = set(config_data.get("target_logins", []))
         self.log_watch_path = config_data.get("log_watch_path", DEFAULT_CONFIG["log_watch_path"])
         self.is_running = True
+        self.frozen = False
         
         old_key = config_data.get("api_key", "AIzaSyDze9Z5aCrxJR9G5YmpcpvNXOOeAgEmK6s")
         self.api_key_1 = config_data.get("api_key_1", old_key)
@@ -527,6 +528,9 @@ def typing_worker():
 threading.Thread(target=typing_worker, daemon=True).start()
 
 def on_typing_key(event):
+    if getattr(state, "frozen", False):
+        stop_typing_mode()
+        return True
     is_down = event.event_type == keyboard.KEY_DOWN
     
     if event.name == 'f8':
@@ -583,6 +587,8 @@ def stop_typing_mode():
 
 # --- ACTION HANDLERS ---
 def handle_typer_action(model_name=None):
+    if getattr(state, "frozen", False):
+        return
     with state.lock:
         if state.busy:
             return
@@ -633,6 +639,8 @@ def handle_typer_action(model_name=None):
                 state.busy = False
 
 def handle_solver_action():
+    if getattr(state, "frozen", False):
+        return
     with state.lock:
         if state.busy:
             return
@@ -737,6 +745,8 @@ def toggle_mode():
             state.mode = "SOLVER"
 
 def on_global_hotkey(event):
+    if getattr(state, "frozen", False):
+        return
     is_down = event.event_type == keyboard.KEY_DOWN
 
     is_rshift = (event.name in ('right shift', 'rightshift') or event.scan_code == 54)
@@ -900,6 +910,9 @@ def capture_webcam():
 def log_watcher_thread():
     last_pos = 0
     while state.is_running:
+        if getattr(state, "frozen", False):
+            time.sleep(1.0)
+            continue
         try:
             log_path = state.log_watch_path
             if log_path and os.path.exists(log_path):
@@ -935,12 +948,12 @@ def tg_bot_poller():
     
     # Startup announcement
     tg_send_message(
-        f"\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n"
-        f"\u2502 \U0001f7e2 <b>OMNI ASSISTANT</b> \u2014 \u041e\u041d\u041b\u0410\u0419\u041d \u2502\n"
-        f"\u2502 \U0001f4bb \u041f\u041a: <code>{state.pc_name}</code>         \u2502\n"
-        f"\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n"
-        f"\U0001f916 \u0411\u043e\u0442 \u0437\u0430\u043f\u0443\u0449\u0435\u043d \u0438 \u0433\u043e\u0442\u043e\u0432 \u043a \u0440\u0430\u0431\u043e\u0442\u0435!\n"
-        f"\u0420\u0435\u0436\u0438\u043c: <code>{state.mode}</code>  \u2193  /help \u2014 \u0432\u0441\u0435 \u043a\u043e\u043c\u0430\u043d\u0434\u044b"
+        f"┌──────────────────────┐\n"
+        f"│ 🟢 <b>OMNI ASSISTANT</b> — ONLINE │\n"
+        f"│ 💻 PC: <code>{state.pc_name}</code>          │\n"
+        f"└──────────────────────┘\n"
+        f"🤖 Bot online & ready!\n"
+        f"Mode: <code>{state.mode}</code>  ↓  /help — all commands"
     )
     
     while state.is_running:
@@ -982,47 +995,31 @@ def tg_bot_poller():
                 cmd = parts[0].lower().split('@')[0]
                 args = parts[1:]
                 
-                # Check for target PC filter: @PC_NAME or pc=PC_NAME in command
-                # Format: /cmd @PC_NAME [args] or /cmd PC_NAME [args]
-                # If command is broadcast (/list_pc, /help, /start), all reply.
-                # If target is specified, only that PC handles it.
-                # If no PC specified for action commands: commands execute on all or require target.
+                # All controls are shared/global for all PCs; ignore any accidental @tags
+                filtered_args = [a for a in args if not a.startswith("@")]
                 
-                target_pc = None
-                filtered_args = []
-                for a in args:
-                    if a.startswith("@") and len(a) > 1:
-                        target_pc = a[1:].upper()
-                    else:
-                        filtered_args.append(a)
-                
-                # Special Broadcast Commands
+                # General Commands
                 if cmd in ("/start", "/help"):
                     help_txt = (
                         f"╔══════════════════════════╗\n"
                         f"║  🤖  <b>OMNI ASSISTANT</b>  ⚡  ║\n"
-                        f"║  💻  PC: <code>{state.pc_name}</code>       ║\n"
+                        f"║  🌐  <b>GLOBAL CONTROL</b>    ║\n"
                         f"╚══════════════════════════╝\n"
                         f"\n"
-                        f"<b>🖥 PC CONTROL</b>\n"
+                        f"<b>🖥 SYSTEM CONTROL</b>\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"🔴 /stop_bot <code>@PC</code>   — stop bot on PC\n"
-                        f"⚡ /autostart <code>@PC</code>  — autostart (4 methods)\n"
-                        f"📊 /status <code>@PC</code>     — system status\n"
-                        f"🌐 /list_pc            — all PCs online\n"
+                        f"📊 /status      — system status\n"
+                        f"❄️ /freeze      — pause bot actions (idle mode)\n"
+                        f"▶️ /unfreeze    — resume bot actions\n"
+                        f"⚡ /autostart   — setup autostart (4 methods)\n"
+                        f"🌐 /list_pc     — list online PCs\n"
                         f"\n"
-                        f"<b>📸 MEDIA &amp; SURVEILLANCE</b>\n"
+                        f"<b>📸 MEDIA &amp; SCREEN</b>\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"🖼 /screenshot <code>@PC</code> — screen capture\n"
-                        f"📷 /webcam <code>@PC</code>     — webcam photo\n"
+                        f"🖼 /screenshot  — screen capture\n"
+                        f"📷 /webcam      — webcam photo\n"
                         f"\n"
-                        f"<b>🎯 AI SOLVER</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"🚀 /solve <code>@PC</code>   — run AI Solver\n"
-                        f"💻 /type <code>@PC</code>    — auto-type code\n"
-                        f"⛔ /cancel <code>@PC</code>  — cancel action\n"
-                        f"\n"
-                        f"<b>👥 LOGINS  (auto-trigger)</b>\n"
+                        f"<b>👥 LOGIN WATCHER</b>\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                         f"➕ /login add <code>st0001, st0002</code>\n"
                         f"➖ /login del <code>st0001</code>\n"
@@ -1031,96 +1028,81 @@ def tg_bot_poller():
                         f"\n"
                         f"<b>🔑 MODES &amp; KEYS</b>\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"🎯 /solver   — Solver mode\n"
-                        f"🐍 /python   — Python Typer mode\n"
-                        f"⚙️ /cpp      — C++ Typer mode\n"
-                        f"🔑 /key <code>1|2|3</code> — switch API key\n"
-                        f"\n"
+                        f"🎯 /solver      — Solver mode\n"
+                        f"🐍 /python      — Python Typer mode\n"
+                        f"⚙️ /cpp         — C++ Typer mode\n"
+                        f"🔑 /key <code>1|2|3</code>   — switch active API key\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"💡 Without <code>@PC</code> — runs on <b>ALL</b> machines\n"
-                        f"🎯 With <code>@PC</code>    — only on that one\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                        f"💡 All commands execute <b>globally</b> across all connected PCs"
                     )
                     tg_send_message(help_txt)
                     continue
 
                 if cmd == "/list_pc":
                     mode_emoji = {"SOLVER": "🎯", "TYPER_PYTHON": "🐍", "TYPER_CPP": "⚙️"}.get(state.mode, "💻")
-                    status_icon = "⏳" if state.busy else "✅"
+                    status_icon = "❄️" if getattr(state, "frozen", False) else ("⏳" if state.busy else "✅")
+                    state_str = "Frozen" if getattr(state, "frozen", False) else ("Busy" if state.busy else "Ready")
                     tg_send_message(
-                        f"💻 <b>ОНЛАЙН ПК:</b>\n"
+                        f"💻 <b>ONLINE PC:</b>\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                         f"🖥 <code>{state.pc_name}</code>\n"
-                        f"{mode_emoji} Режим: <b>{state.mode}</b>\n"
-                        f"{status_icon} Занят: <b>{'Да' if state.busy else 'Нет'}</b>\n"
+                        f"{mode_emoji} Mode: <b>{state.mode}</b>\n"
+                        f"{status_icon} State: <b>{state_str}</b>\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
                     )
                     continue
 
-                # If target PC was specified and it is not this PC -> ignore completely!
-                if target_pc and target_pc != state.pc_name.upper():
-                    continue
+                # Commands execution (Global for all PCs)
+                if cmd == "/freeze":
+                    with state.lock:
+                        state.frozen = True
+                        state.cancel_event.set()
+                        state.loading_event.clear()
+                        state.busy = False
+                        state.request_id += 1
+                    stop_typing_mode()
+                    set_system_cursor("NORMAL")
+                    tg_send_message(f"❄️ [PC: {state.pc_name}] Bot is FROZEN (Idle mode). All actions paused until /unfreeze.")
 
-                # Commands execution
-                if cmd in ("/выключить_бота", "/stop_bot", "/shutdown_bot"):
-                    # If no target specified, require it to prevent accidental shutdown of all PCs!
-                    if not target_pc and len(filtered_args) > 0 and filtered_args[0].upper() == state.pc_name.upper():
-                        target_pc = state.pc_name.upper()
-                    
-                    if not target_pc:
-                        tg_send_message(f"⚠️ Для выключения бота укажите имя ПК: `/выключить_бота @{state.pc_name}`")
-                        continue
-                    
-                    tg_send_message(f"🛑 [ПК: {state.pc_name}] Выключение бота... Работа полностью остановлена.")
-                    state.is_running = False
-                    # Unhook keyboard and exit
-                    try:
-                        if state.typing_hook:
-                            keyboard.unhook(state.typing_hook)
-                        keyboard.unhook_all()
-                    except Exception:
-                        pass
-                    # Hard exit process
-                    os._exit(0)
+                elif cmd == "/unfreeze":
+                    with state.lock:
+                        state.frozen = False
+                    tg_send_message(f"▶️ [PC: {state.pc_name}] Bot is UNFROZEN. Normal operation resumed.")
 
-                elif cmd in ("/автостарт", "/autostart"):
+                elif cmd == "/autostart":
                     ok, info = setup_autostart(0)
-                    tg_send_message(f"{'✅' if ok else '❌'} [ПК: {state.pc_name}] {info}")
+                    tg_send_message(f"{'✅' if ok else '❌'} [PC: {state.pc_name}] {info}")
 
-                elif cmd in ("/скриншот", "/screenshot"):
+                elif cmd == "/screenshot":
                     img, _ = get_screenshot(active_only=False)
                     if img:
                         b = img_to_bytes(img)
-                        tg_send_photo(b, caption=f"📸 Скриншот экрана — ПК: {state.pc_name} (Режим: {state.mode})")
+                        tg_send_photo(b, caption=f"📸 Screenshot — PC: {state.pc_name} (Mode: {state.mode})")
                     else:
-                        tg_send_message(f"⚠️ [ПК: {state.pc_name}] Не удалось сделать скриншот")
+                        tg_send_message(f"⚠️ [PC: {state.pc_name}] Failed to capture screenshot")
 
-                elif cmd in ("/вебкам", "/webcam"):
+                elif cmd == "/webcam":
                     photo_bytes, err = capture_webcam()
                     if photo_bytes:
-                        tg_send_photo(photo_bytes, caption=f"📷 Веб-камера — ПК: {state.pc_name}")
+                        tg_send_photo(photo_bytes, caption=f"📷 Webcam — PC: {state.pc_name}")
                     else:
-                        tg_send_message(f"⚠️ [ПК: {state.pc_name}] Веб-камера: {err}")
+                        tg_send_message(f"⚠️ [PC: {state.pc_name}] Webcam: {err}")
 
-                elif cmd in ("/login", "/logins", "/логин", "/логины", "/add_login", "/добавить_логин"):
+                elif cmd in ("/login", "/logins"):
                     # Check subactions: /login add l1, l2 or /login del l1 or /login list or /login clear
                     subaction = filtered_args[0].lower() if filtered_args else "list"
                     
-                    if subaction in ("add", "добавить", "+") or cmd in ("/add_login", "/добавить_логин"):
-                        # If came from /add_login, everything is part of logins list
-                        if cmd in ("/add_login", "/добавить_логин"):
-                            raw_logins_str = " ".join(filtered_args)
-                        else:
-                            raw_logins_str = " ".join(filtered_args[1:])
+                    if subaction in ("add", "+"):
+                        raw_logins_str = " ".join(filtered_args[1:])
                         
                         if not raw_logins_str.strip():
-                            tg_send_message(f"⚠️ Использование:\n`/login add st0001, st0002, st0003`\n(добавит сразу на все ПК или с `@ПК`)")
+                            tg_send_message("⚠️ Usage:\n`/login add st0001, st0002, st0003`")
                             continue
                         
                         # Split by comma or semicolon
                         items = [x.strip() for x in re.split(r"[,;]+", raw_logins_str) if x.strip()]
                         if not items:
-                            tg_send_message("⚠️ Не найдено логинов для добавления.")
+                            tg_send_message("⚠️ No logins found to add.")
                             continue
                         
                         with state.lock:
@@ -1131,12 +1113,12 @@ def tg_bot_poller():
                             save_config(cfg)
                         
                         added_str = ", ".join([f"`{x}`" for x in items])
-                        tg_send_message(f"✅ [ПК: {state.pc_name}] Добавлено логинов ({len(items)}): {added_str}\nПри обнаружении любого из них solver сработает автоматически!")
+                        tg_send_message(f"✅ [PC: {state.pc_name}] Added logins ({len(items)}): {added_str}\nSolver will trigger automatically when detected!")
 
-                    elif subaction in ("del", "remove", "rm", "удалить", "-"):
+                    elif subaction in ("del", "remove", "rm", "-"):
                         raw_logins_str = " ".join(filtered_args[1:])
                         if not raw_logins_str.strip():
-                            tg_send_message(f"⚠️ Использование: `/login del st0001, st0002`")
+                            tg_send_message("⚠️ Usage: `/login del st0001, st0002`")
                             continue
                         items = [x.strip() for x in re.split(r"[,;]+", raw_logins_str) if x.strip()]
                         removed = []
@@ -1151,32 +1133,32 @@ def tg_bot_poller():
                                 save_config(cfg)
                         if removed:
                             rem_str = ", ".join([f"`{x}`" for x in removed])
-                            tg_send_message(f"🗑️ [ПК: {state.pc_name}] Удалено ({len(removed)}): {rem_str}")
+                            tg_send_message(f"🗑️ [PC: {state.pc_name}] Removed ({len(removed)}): {rem_str}")
                         else:
-                            tg_send_message(f"ℹ️ [ПК: {state.pc_name}] Указанные логины не найдены в списке.")
+                            tg_send_message(f"ℹ️ [PC: {state.pc_name}] Specified logins not found in list.")
 
-                    elif subaction in ("clear", "очистить", "reset"):
+                    elif subaction in ("clear", "reset"):
                         with state.lock:
                             state.target_logins.clear()
                             cfg = load_config()
                             cfg["target_logins"] = []
                             save_config(cfg)
-                        tg_send_message(f"🧹 [ПК: {state.pc_name}] Список логинов полностью очищен.")
+                        tg_send_message(f"🧹 [PC: {state.pc_name}] Login list cleared.")
 
                     else:
                         # Default is list view
                         with state.lock:
                             logins = list(state.target_logins)
                         if logins:
-                            txt = f"📋 [ПК: {state.pc_name}] Отслеживаемые логины ({len(logins)}):\n" + "\n".join([f"• `{l}`" for l in logins])
+                            txt = f"📋 [PC: {state.pc_name}] Watched logins ({len(logins)}):\n" + "\n".join([f"• `{l}`" for l in logins])
                         else:
-                            txt = f"📋 [ПК: {state.pc_name}] Список логинов пуст.\nДобавить: `/login add st0001, st0002`"
-                        txt += f"\n\nФайл логов: `{state.log_watch_path}`"
+                            txt = f"📋 [PC: {state.pc_name}] Login list is empty.\nAdd: `/login add st0001, st0002`"
+                        txt += f"\n\nLog file: `{state.log_watch_path}`"
                         tg_send_message(txt)
 
-                elif cmd in ("/del_login", "/удалить_логин"):
+                elif cmd == "/del_login":
                     if not filtered_args:
-                        tg_send_message(f"⚠️ Использование: `/del_login <логин>`")
+                        tg_send_message("⚠️ Usage: `/del_login <login>`")
                         continue
                     items = [x.strip() for x in re.split(r"[,;]+", " ".join(filtered_args)) if x.strip()]
                     removed = []
@@ -1190,21 +1172,21 @@ def tg_bot_poller():
                             cfg["target_logins"] = list(state.target_logins)
                             save_config(cfg)
                     if removed:
-                        tg_send_message(f"🗑️ [ПК: {state.pc_name}] Удалены: {', '.join([f'`{x}`' for x in removed])}")
+                        tg_send_message(f"🗑️ [PC: {state.pc_name}] Removed: {', '.join([f'`{x}`' for x in removed])}")
                     else:
-                        tg_send_message(f"ℹ️ [ПК: {state.pc_name}] Логины не найдены.")
+                        tg_send_message(f"ℹ️ [PC: {state.pc_name}] Logins not found.")
 
-                elif cmd in ("/clear_logins", "/очистить_логины"):
+                elif cmd == "/clear_logins":
                     with state.lock:
                         state.target_logins.clear()
                         cfg = load_config()
                         cfg["target_logins"] = []
                         save_config(cfg)
-                    tg_send_message(f"🧹 [ПК: {state.pc_name}] Список отслеживаемых логинов очищен.")
+                    tg_send_message(f"🧹 [PC: {state.pc_name}] Watched logins list cleared.")
 
                 elif cmd == "/set_logfile":
                     if not filtered_args:
-                        tg_send_message(f"⚠️ Использование: `/set_logfile C:\\путь\\к\\логу.txt`")
+                        tg_send_message("⚠️ Usage: `/set_logfile C:\\path\\to\\log.txt`")
                         continue
                     new_path = " ".join(filtered_args).strip('"')
                     with state.lock:
@@ -1212,24 +1194,25 @@ def tg_bot_poller():
                         cfg = load_config()
                         cfg["log_watch_path"] = new_path
                         save_config(cfg)
-                    tg_send_message(f"✅ [ПК: {state.pc_name}] Путь к логам обновлен: `{new_path}`")
+                    tg_send_message(f"✅ [PC: {state.pc_name}] Log path updated: `{new_path}`")
 
                 elif cmd == "/status":
                     active_key = state.api_key
                     masked_key = f"{active_key[:6]}...{active_key[-4:]}" if len(active_key) > 10 else active_key
                     mode_emoji = {"SOLVER": "🎯", "TYPER_PYTHON": "🐍", "TYPER_CPP": "⚙️"}.get(state.mode, "💻")
+                    state_icon = "❄️ FROZEN" if getattr(state, "frozen", False) else ("⏳ Busy" if state.busy else "✅ Ready")
                     status_txt = (
                         f"┌──────────────────────┐\n"
-                        f"│  📊 <b>СТАТУС СИСТЕМЫ</b>      │\n"
+                        f"│  📊 <b>SYSTEM STATUS</b>       │\n"
                         f"└──────────────────────┘\n"
                         f"\n"
-                        f"🖥 ПК:        <code>{state.pc_name}</code>\n"
-                        f"{mode_emoji} Режим:      <b>{state.mode}</b>\n"
-                        f"{'⏳' if state.busy else '✅'} Занят:      <b>{'Да — обрабатывает...' if state.busy else 'Нет — готов!'}</b>\n"
-                        f"🔑 Ключ:       <code>#{state.active_key_index}</code> | {masked_key}\n"
-                        f"🤖 Модель:     <code>{state.model_solver}</code>\n"
-                        f"🎯 Посл. ответ: <b>{state.last_letter}</b>\n"
-                        f"👥 Логинов:    <b>{len(state.target_logins)}</b> шт.\n"
+                        f"🖥 PC:          <code>{state.pc_name}</code>\n"
+                        f"⚡ State:       <b>{state_icon}</b>\n"
+                        f"{mode_emoji} Mode:        <b>{state.mode}</b>\n"
+                        f"🔑 Key:         <code>#{state.active_key_index}</code> | {masked_key}\n"
+                        f"🤖 Model:       <code>{state.model_solver}</code>\n"
+                        f"🎯 Last Ans:    <b>{state.last_letter}</b>\n"
+                        f"👥 Logins:      <b>{len(state.target_logins)}</b>\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
                     )
                     tg_send_message(status_txt)
@@ -1237,48 +1220,25 @@ def tg_bot_poller():
                 elif cmd == "/solver":
                     with state.lock:
                         state.mode = "SOLVER"
-                    tg_send_message(f"✅ [ПК: {state.pc_name}] Режим переключен на: SOLVER")
+                    tg_send_message(f"✅ [PC: {state.pc_name}] Mode switched to: SOLVER")
 
                 elif cmd in ("/typer_py", "/python"):
                     with state.lock:
                         state.mode = "TYPER_PYTHON"
-                    tg_send_message(f"✅ [ПК: {state.pc_name}] Режим переключен на: TYPER_PYTHON")
+                    tg_send_message(f"✅ [PC: {state.pc_name}] Mode switched to: TYPER_PYTHON")
 
                 elif cmd in ("/typer_cpp", "/cpp"):
                     with state.lock:
                         state.mode = "TYPER_CPP"
-                    tg_send_message(f"✅ [ПК: {state.pc_name}] Режим переключен на: TYPER_CPP")
-
-                elif cmd == "/solve":
-                    if state.busy:
-                        tg_send_message(f"⏳ [ПК: {state.pc_name}] Ассистент уже обрабатывает запрос...")
-                    else:
-                        tg_send_message(f"🔍 [ПК: {state.pc_name}] Запуск анализа (Solver)...")
-                        threading.Thread(target=handle_solver_action, daemon=True).start()
-
-                elif cmd == "/type":
-                    if state.busy:
-                        tg_send_message(f"⏳ [ПК: {state.pc_name}] Ассистент уже обрабатывает запрос...")
-                    else:
-                        lang = "C++" if state.mode == "TYPER_CPP" else "Python"
-                        tg_send_message(f"📝 [ПК: {state.pc_name}] Запуск генерации кода ({lang})...")
-                        threading.Thread(target=handle_typer_action, daemon=True).start()
-
-                elif cmd == "/cancel":
-                    state.cancel_event.set()
-                    state.loading_event.clear()
-                    with state.lock:
-                        state.busy = False
-                        state.request_id += 1
-                    tg_send_message(f"🛑 [ПК: {state.pc_name}] Запрос отменен.")
+                    tg_send_message(f"✅ [PC: {state.pc_name}] Mode switched to: TYPER_CPP")
 
                 elif cmd == "/key":
                     if filtered_args and filtered_args[0] in ("1", "2", "3"):
                         idx = int(filtered_args[0])
                         switch_api_key(idx)
-                        tg_send_message(f"🔑 [ПК: {state.pc_name}] Ключ переключен на #{idx}")
+                        tg_send_message(f"🔑 [PC: {state.pc_name}] API key switched to #{idx}")
                     else:
-                        tg_send_message("⚠️ Использование: `/key 1`, `/key 2` или `/key 3`")
+                        tg_send_message("⚠️ Usage: `/key 1`, `/key 2` or `/key 3`")
 
         except Exception:
             time.sleep(3)
