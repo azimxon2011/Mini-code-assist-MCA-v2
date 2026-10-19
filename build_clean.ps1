@@ -4,9 +4,19 @@ $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $VenvPath = Join-Path $ProjectRoot ".venv-light"
 $PythonExe = Join-Path $VenvPath "Scripts\python.exe"
 
+$DestExe = Join-Path $ProjectRoot "python.exe"
+
+# Stop any python processes holding venv or exe
+Get-Process python -ErrorAction SilentlyContinue | Where-Object { 
+  $_.Path -and ($_.Path -like "*\.venv-light\*" -or $_.Path -eq $DestExe)
+} | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 500
+
 # Create clean dedicated lightweight venv
-if (-not (Test-Path $VenvPath)) {
+$PyVenvCfg = Join-Path $VenvPath "pyvenv.cfg"
+if (-not (Test-Path $PyVenvCfg)) {
   Write-Host "Creating fresh lightweight venv at .venv-light..."
+  Remove-Item -Recurse -Force $VenvPath -ErrorAction SilentlyContinue
   py -3 -m venv $VenvPath
 }
 
@@ -23,9 +33,7 @@ Write-Host "Starting PyInstaller build..."
   --exclude-module matplotlib `
   --exclude-module scipy `
   --exclude-module pandas `
-  --exclude-module numpy `
   --exclude-module IPython `
-  --exclude-module cv2 `
   --exclude-module grpc `
   --exclude-module google `
   --exclude-module unittest `
@@ -39,6 +47,15 @@ $BuiltExe = Join-Path $ProjectRoot "temp_build\dist\python.exe"
 $DestExe = Join-Path $ProjectRoot "python.exe"
 
 if (Test-Path $BuiltExe) {
+  # Stop any running instances of the destination python.exe
+  Get-Process python -ErrorAction SilentlyContinue | Where-Object { 
+    $_.Path -and ($_.Path -eq $DestExe)
+  } | Stop-Process -Force -ErrorAction SilentlyContinue
+  Start-Sleep -Milliseconds 500
+
+  if (Test-Path $DestExe) {
+    Remove-Item -Force $DestExe -ErrorAction SilentlyContinue
+  }
   Move-Item -Force $BuiltExe $DestExe
   $SizeMB = [math]::Round((Get-Item $DestExe).Length / 1MB, 2)
   Write-Host "SUCCESS: Built $DestExe with size: $SizeMB MB"
