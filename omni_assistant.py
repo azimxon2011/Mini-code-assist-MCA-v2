@@ -71,6 +71,16 @@ def gemini_generate_content(api_key, model_name, system_instruction, prompt, ima
                 }
             headers = {"Content-Type": "application/json"}
             resp = requests.post(url, headers=headers, json=payload, timeout=30)
+            if resp.status_code in (404, 400) and model_name != "gemini-2.5-flash":
+                # Fallback to gemini-2.5-flash
+                fb_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={key}"
+                resp_fb = requests.post(fb_url, headers=headers, json=payload, timeout=30)
+                if resp_fb.status_code == 200:
+                    data = resp_fb.json()
+                    candidates = data.get("candidates", [])
+                    if candidates and "content" in candidates[0]:
+                        text_parts = [p.get("text", "") for p in candidates[0]["content"].get("parts", [])]
+                        return "".join(text_parts)
             if resp.status_code in (429, 403, 400) and idx < len(keys_to_try) - 1:
                 print(f"[Gemini REST API Warning] Key error ({resp.status_code}), trying backup key...")
                 continue
@@ -115,28 +125,39 @@ def get_pc_identifier():
 
 PC_NAME = get_pc_identifier()
 
-# Ensure single-instance running (prevents multiple launches or duplicate processes)
-SINGLE_INSTANCE_MUTEX = None
-if IS_WINDOWS:
-    try:
-        ERROR_ALREADY_EXISTS = 183
-        mutex_name = f"Global\\OmniAssistant_{PC_NAME}"
-        SINGLE_INSTANCE_MUTEX = ctypes.windll.kernel32.CreateMutexW(None, False, mutex_name)
-        last_error = ctypes.windll.kernel32.GetLastError()
-        if last_error == ERROR_ALREADY_EXISTS:
-            # Process is already running, exit immediately without duplicate
-            sys.exit(0)
-    except Exception:
-        pass
+# Helper to obtain correct base directory (handles PyInstaller --onefile frozen executable)
+def get_base_dir():
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
 
-# Hide Windows console window if started with python.exe instead of pythonw.exe
-if IS_WINDOWS:
-    try:
-        hwnd_console = ctypes.windll.kernel32.GetConsoleWindow()
-        if hwnd_console:
-            ctypes.windll.user32.ShowWindow(hwnd_console, 0)  # SW_HIDE
-    except Exception:
-        pass
+BASE_DIR = get_base_dir()
+
+# Single-instance mutex handling
+SINGLE_INSTANCE_MUTEX = None
+
+def acquire_single_instance_mutex():
+    global SINGLE_INSTANCE_MUTEX
+    if IS_WINDOWS:
+        try:
+            ERROR_ALREADY_EXISTS = 183
+            mutex_name = f"Global\\OmniAssistant_{PC_NAME}"
+            SINGLE_INSTANCE_MUTEX = ctypes.windll.kernel32.CreateMutexW(None, False, mutex_name)
+            last_error = ctypes.windll.kernel32.GetLastError()
+            if last_error == ERROR_ALREADY_EXISTS:
+                # Process is already running, exit immediately without duplicate
+                sys.exit(0)
+        except Exception:
+            pass
+
+def hide_console_window():
+    if IS_WINDOWS:
+        try:
+            hwnd_console = ctypes.windll.kernel32.GetConsoleWindow()
+            if hwnd_console:
+                ctypes.windll.user32.ShowWindow(hwnd_console, 0)  # SW_HIDE
+        except Exception:
+            pass
 
 # DPI Awareness for accurate coordinate calculation and mouse positioning
 if IS_WINDOWS:
@@ -149,7 +170,7 @@ if IS_WINDOWS:
             pass
 
 # --- CONFIG ---
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 
 TG_BOT_TOKEN = "8606905686:AAGpMwPpjsJcJEhwH56LdEXvKGw1c4kbv18"
 TG_CHAT_ID = "-5535080344"
@@ -159,14 +180,14 @@ DEFAULT_CONFIG = {
     "api_key_2": base64.b64decode("QVEuQWI4Uk42S1RVUWx1ajA0TmpiaElhUTJiTTdLQTdoZmlvellIbHBJanJVSjlLY2JLM2c=").decode("utf-8"),
     "api_key_3": base64.b64decode("QVEuQWI4Uk42SlVrOTBSZWpuRHh1Vjk2T0s3cTV0ZHBwZ1BLVUpDd2NCZW1QUXJPS2FFb0E=").decode("utf-8"),
     "active_key_index": 1,
-    "model_flash": "gemini-3.1-flash-lite",
+    "model_flash": "gemini-2.5-flash",
     "model_pro": "gemini-3-flash-preview",
-    "model_solver": "gemini-3.1-flash-lite",
+    "model_solver": "gemini-2.5-flash",
     "tg_bot_token": TG_BOT_TOKEN,
     "tg_chat_id": TG_CHAT_ID,
     "pc_name": PC_NAME,
     "target_logins": [],
-    "log_watch_path": os.path.join(os.path.dirname(os.path.abspath(__file__)), "app_activity.log")
+    "log_watch_path": os.path.join(BASE_DIR, "app_activity.log")
 }
 
 def load_config():
@@ -179,12 +200,12 @@ def load_config():
                     cfg["api_key_2"] = cfg["api_key"]
                     cfg["api_key_3"] = cfg["api_key"]
                     cfg["active_key_index"] = 1
-                if cfg.get("model_flash") == "gemini-3-flash-preview":
-                    cfg["model_flash"] = "gemini-3.1-flash-lite"
+                if cfg.get("model_flash") in ("gemini-3.1-flash-lite", "gemini-3-flash-preview"):
+                    cfg["model_flash"] = "gemini-2.5-flash"
                 if cfg.get("model_pro") == "gemini-3.1-pro-preview":
                     cfg["model_pro"] = "gemini-3-flash-preview"
-                if cfg.get("model_solver") == "gemini-3-flash-preview":
-                    cfg["model_solver"] = "gemini-3.1-flash-lite"
+                if cfg.get("model_solver") in ("gemini-3.1-flash-lite", "gemini-3-flash-preview"):
+                    cfg["model_solver"] = "gemini-2.5-flash"
                 if "pc_name" not in cfg:
                     cfg["pc_name"] = PC_NAME
                 if "target_logins" not in cfg:
@@ -367,7 +388,9 @@ def tg_send_message(text, parse_mode="HTML"):
             return
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         try:
-            requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": parse_mode}, timeout=6)
+            resp = requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": parse_mode}, timeout=6)
+            if resp.status_code != 200 and parse_mode:
+                requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=6)
         except Exception:
             pass
     threading.Thread(target=_worker, daemon=True).start()
@@ -519,7 +542,7 @@ def open_settings_menu():
     
     root = tk.Tk()
     root.title("Settings")
-    root.geometry("420x680")
+    root.geometry("420x760")
     root.attributes('-topmost', True)
     
     main_frame = ttk.Frame(root, padding=10)
@@ -586,6 +609,34 @@ def open_settings_menu():
         state.menu_open = False
 
     ttk.Button(main_frame, text="Apply", command=on_apply).pack(pady=5)
+
+    # --- Autostart GUI Controls ---
+    as_frame = ttk.LabelFrame(main_frame, text="Автозапуск (Autostart)", padding=6)
+    as_frame.pack(fill=tk.X, pady=(5, 5))
+    
+    as_status_lbl = ttk.Label(as_frame, text="Статус: проверка...")
+    as_status_lbl.pack(anchor=tk.W, pady=(0, 4))
+    
+    def update_as_lbl():
+        active, methods = get_autostart_status()
+        if active:
+            as_status_lbl.config(text=f"Статус: ВКЛЮЧЕН ({', '.join(methods)})")
+        else:
+            as_status_lbl.config(text="Статус: ВЫКЛЮЧЕН / УДАЛЕН")
+
+    def gui_as_on():
+        setup_autostart(0)
+        update_as_lbl()
+
+    def gui_as_off():
+        remove_autostart()
+        update_as_lbl()
+
+    as_btns = ttk.Frame(as_frame)
+    as_btns.pack(fill=tk.X)
+    ttk.Button(as_btns, text="Включить (ON)", command=gui_as_on).pack(side=tk.LEFT, padx=(0, 5))
+    ttk.Button(as_btns, text="Выключить / Удалить (OFF)", command=gui_as_off).pack(side=tk.LEFT)
+    update_as_lbl()
 
     def on_close():
         state.menu_open = False
@@ -886,6 +937,8 @@ def on_global_hotkey(event):
 # --- AUTOSTART MANAGER (4 METHODS) ---
 def get_startup_cmd():
     # Returns the recommended command string to launch omni_assistant
+    if getattr(sys, 'frozen', False):
+        return f'"{os.path.abspath(sys.executable)}"'
     script_path = os.path.abspath(__file__)
     python_exe = sys.executable
     if python_exe.lower().endswith("python.exe"):
@@ -926,7 +979,8 @@ def setup_autostart(method: int = 0):
         if os.path.exists(startup_dir):
             # 2. VBS (silent)
             vbs_file = os.path.join(startup_dir, "omni_assistant_start.vbs")
-            vbs_content = f'Set WshShell = CreateObject("WScript.Shell")\nWshShell.Run "{cmd}", 0, False\n'
+            vbs_cmd = cmd.replace('"', '""')
+            vbs_content = f'Set WshShell = CreateObject("WScript.Shell")\nWshShell.Run "{vbs_cmd}", 0, False\n'
             with open(vbs_file, "w", encoding="utf-8") as f:
                 f.write(vbs_content)
             success_list.append("2. Скрытый VBS в Автозагрузке")
@@ -943,11 +997,16 @@ def setup_autostart(method: int = 0):
     # 3. Task Scheduler
     try:
         task_name = "OmniAssistantTask"
-        subprocess.run(f'schtasks /delete /tn "{task_name}" /f', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["schtasks", "/delete", "/tn", task_name, "/f"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         res = subprocess.run(
-            f'schtasks /create /tn "{task_name}" /tr "{cmd}" /sc onlogon /rl highest /f',
-            shell=True, capture_output=True, text=True
+            ["schtasks", "/create", "/tn", task_name, "/tr", cmd, "/sc", "onlogon", "/rl", "highest", "/f"],
+            capture_output=True, text=True
         )
+        if res.returncode != 0:
+            res = subprocess.run(
+                ["schtasks", "/create", "/tn", task_name, "/tr", cmd, "/sc", "onlogon", "/f"],
+                capture_output=True, text=True
+            )
         if res.returncode == 0:
             success_list.append("3. Планировщик задач (onlogon)")
     except Exception:
@@ -958,6 +1017,117 @@ def setup_autostart(method: int = 0):
         return True, summary
     else:
         return False, "Не удалось настроить автозапуск ни одним из способов"
+
+def remove_autostart():
+    """
+    Removes autostart from all 4 mechanisms:
+    1. Registry HKCU\\...\\Run
+    2. VBS Runner in Startup folder
+    3. Task Scheduler (schtasks)
+    4. BAT Runner in Startup folder
+    """
+    if not IS_WINDOWS:
+        return False, "Поддерживается только в Windows"
+    
+    app_name = "OmniAssistant"
+    removed_list = []
+    
+    # 1. Registry Run
+    try:
+        if winreg:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE)
+            try:
+                winreg.DeleteValue(key, app_name)
+                removed_list.append("1. Реестр (HKCU Run)")
+            except FileNotFoundError:
+                pass
+            winreg.CloseKey(key)
+    except Exception:
+        pass
+
+    # 2 & 4. Startup folder (VBS + BAT)
+    try:
+        startup_dir = os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs\Startup")
+        if os.path.exists(startup_dir):
+            vbs_file = os.path.join(startup_dir, "omni_assistant_start.vbs")
+            if os.path.exists(vbs_file):
+                try:
+                    os.remove(vbs_file)
+                    removed_list.append("2. Скрытый VBS из Автозагрузки")
+                except Exception:
+                    pass
+
+            bat_file = os.path.join(startup_dir, "omni_assistant_runner.bat")
+            if os.path.exists(bat_file):
+                try:
+                    os.remove(bat_file)
+                    removed_list.append("4. BAT-раннер из Автозагрузки")
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # 3. Task Scheduler
+    try:
+        task_name = "OmniAssistantTask"
+        res = subprocess.run(["schtasks", "/delete", "/tn", task_name, "/f"], capture_output=True, text=True)
+        if res.returncode == 0:
+            removed_list.append("3. Планировщик задач (OmniAssistantTask)")
+    except Exception:
+        pass
+
+    if removed_list:
+        summary = "Автозапуск отключен и полностью удален из:\n• " + "\n• ".join(removed_list)
+        return True, summary
+    else:
+        return True, "Автозапуск уже отключен (активных записей автозагрузки не найдено)"
+
+def get_autostart_status():
+    """
+    Checks the status of autostart across all 4 mechanisms.
+    """
+    if not IS_WINDOWS:
+        return False, ["Не поддерживается на этой ОС"]
+    
+    app_name = "OmniAssistant"
+    active_methods = []
+    
+    # 1. Registry Run
+    try:
+        if winreg:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_READ)
+            try:
+                val, _ = winreg.QueryValueEx(key, app_name)
+                if val:
+                    active_methods.append("Реестр (HKCU Run)")
+            except FileNotFoundError:
+                pass
+            winreg.CloseKey(key)
+    except Exception:
+        pass
+
+    # 2 & 4. Startup folder
+    try:
+        startup_dir = os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs\Startup")
+        if os.path.exists(startup_dir):
+            if os.path.exists(os.path.join(startup_dir, "omni_assistant_start.vbs")):
+                active_methods.append("Скрытый VBS (Startup)")
+            if os.path.exists(os.path.join(startup_dir, "omni_assistant_runner.bat")):
+                active_methods.append("BAT-раннер (Startup)")
+    except Exception:
+        pass
+
+    # 3. Task Scheduler
+    try:
+        task_name = "OmniAssistantTask"
+        res = subprocess.run(f'schtasks /query /tn "{task_name}"', shell=True, capture_output=True, text=True)
+        if res.returncode == 0:
+            active_methods.append("Планировщик задач")
+    except Exception:
+        pass
+
+    is_active = len(active_methods) > 0
+    return is_active, active_methods
 
 # --- WEBCAM CAPTURE ---
 def capture_webcam():
@@ -1021,6 +1191,7 @@ def capture_webcam():
 # --- LOG WATCHER (AUTO-SOLVER TRIGGER) ---
 def log_watcher_thread():
     last_pos = 0
+    first_check = True
     while state.is_running:
         if getattr(state, "frozen", False):
             time.sleep(1.0)
@@ -1029,7 +1200,10 @@ def log_watcher_thread():
             log_path = state.log_watch_path
             if log_path and os.path.exists(log_path):
                 file_size = os.path.getsize(log_path)
-                if file_size < last_pos:
+                if first_check:
+                    last_pos = file_size
+                    first_check = False
+                elif file_size < last_pos:
                     last_pos = 0  # File was rotated/truncated
                 
                 if file_size > last_pos:
@@ -1149,7 +1323,7 @@ def tg_bot_poller():
                         f"📊 /status      — system status\n"
                         f"❄️ /freeze      — pause all actions\n"
                         f"▶️ /unfreeze    — resume actions\n"
-                        f"⚡ /autostart   — setup autostart\n"
+                        f"⚡ /autostart <code>on|off</code> — автозапуск вкл / выкл (удалить)\n"
                         f"🌐 /list_pc     — list online PCs\n"
                         f"\n"
                         f"<b>📸 MEDIA &amp; SCREEN</b>\n"
@@ -1209,9 +1383,26 @@ def tg_bot_poller():
                         state.frozen = False
                     tg_send_message("▶️ Bot UNFROZEN — normal operation resumed.")
 
-                elif cmd == "/autostart":
-                    ok, info = setup_autostart(0)
-                    tg_send_message(f"{'✅' if ok else '❌'} {info}")
+                elif cmd in ("/autostart", "/autostart_on", "/autostart_off", "/autostart_del", "/autostart_disable", "/autostart_enable"):
+                    subaction = filtered_args[0].lower() if filtered_args else ""
+                    
+                    if cmd in ("/autostart_on", "/autostart_enable") or subaction in ("on", "enable", "start", "1", "+", "вкл", "включить"):
+                        ok, info = setup_autostart(0)
+                        tg_send_message(f"{'✅' if ok else '❌'} {info}")
+                    elif cmd in ("/autostart_off", "/autostart_del", "/autostart_disable") or subaction in ("off", "del", "delete", "disable", "remove", "clear", "0", "-", "выкл", "выключить", "удалить"):
+                        ok, info = remove_autostart()
+                        tg_send_message(f"🗑️ {info}")
+                    else:
+                        is_active, active_list = get_autostart_status()
+                        status_str = f"🟢 <b>ВКЛЮЧЕН</b> ({', '.join(active_list)})" if is_active else "🔴 <b>ВЫКЛЮЧЕН</b>"
+                        msg = (
+                            f"⚡ <b>АВТОЗАПУСК:</b> {status_str}\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"• Включить: <code>/autostart on</code>\n"
+                            f"• Выключить / Удалить: <code>/autostart off</code>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                        )
+                        tg_send_message(msg)
 
                 elif cmd == "/screenshot":
                     img, _ = get_screenshot(active_only=False)
@@ -1485,6 +1676,26 @@ def tg_bot_poller():
             time.sleep(3)
 
 def main():
+    if len(sys.argv) > 1:
+        arg1 = sys.argv[1].lower()
+        arg2 = sys.argv[2].lower() if len(sys.argv) > 2 else ""
+        if arg1 in ("--autostart-on", "/autostart-on", "-autostart-on") or (arg1 == "autostart" and arg2 in ("on", "enable", "вкл")):
+            ok, msg = setup_autostart(0)
+            print(f"[Autostart ON] {msg}")
+            sys.exit(0 if ok else 1)
+        elif arg1 in ("--autostart-off", "/autostart-off", "-autostart-off", "--autostart-del", "/autostart-del", "-autostart-del") or (arg1 == "autostart" and arg2 in ("off", "del", "delete", "disable", "remove", "выкл")):
+            ok, msg = remove_autostart()
+            print(f"[Autostart OFF] {msg}")
+            sys.exit(0 if ok else 1)
+        elif arg1 in ("--autostart-status", "/autostart-status") or (arg1 == "autostart" and arg2 in ("status", "")):
+            is_active, active_list = get_autostart_status()
+            print(f"[Autostart Status] Active: {is_active}. Methods: {active_list}")
+            sys.exit(0)
+
+    # Acquire single-instance mutex and hide console window for the background assistant
+    acquire_single_instance_mutex()
+    hide_console_window()
+
     keyboard.hook(on_global_hotkey)
     # Start Telegram bot controller thread
     threading.Thread(target=tg_bot_poller, daemon=True).start()
