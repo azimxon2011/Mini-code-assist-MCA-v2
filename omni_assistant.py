@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import sys
+import traceback
 import os
 import io
 import time
@@ -27,16 +28,32 @@ try:
     import cv2
 except ImportError:
     cv2 = None
-from PIL import ImageGrab
+from PIL import ImageGrab, Image
 import tkinter as tk
 from tkinter import ttk, messagebox
 
 # Suppress deprecation warnings from libraries
 warnings.filterwarnings("ignore")
 
-def gemini_generate_content(api_key, model_name, system_instruction, prompt, image_b64=None):
-    keys_to_try = [api_key]
+def gemini_generate_content(api_key, model_name, system_instruction, prompt, image_bytes=None, image_b64=None):
+    """
+    Ultra-reliable Gemini caller.
+    1. Tries google.genai SDK directly for fastest execution and best support.
+    2. Falls back to REST API.
+    3. Auto-fallback across models: [requested, gemini-3.5-flash-lite, gemini-3-flash-preview, gemini-3.8-flash, gemini-flash-latest].
+    4. Auto-rotation across configured API keys on quota / auth errors.
+    """
+    if image_bytes is None and image_b64 is not None:
+        try:
+            image_bytes = base64.b64decode(image_b64)
+        except Exception:
+            pass
+
+    # Collect available API keys
+    keys_to_try = []
     st = globals().get("state")
+    if api_key and api_key not in keys_to_try:
+        keys_to_try.append(api_key)
     if st:
         try:
             with st.lock:
@@ -46,68 +63,84 @@ def gemini_generate_content(api_key, model_name, system_instruction, prompt, ima
         except Exception:
             pass
 
+    # Model priority chain
+    models_to_try = [model_name, "gemini-3.5-flash-lite", "gemini-3-flash-preview", "gemini-3.8-flash", "gemini-flash-latest"]
+    cleaned_models = []
+    seen = set()
+    for m in models_to_try:
+        if m and m not in seen:
+            seen.add(m)
+            cleaned_models.append(m)
+
     last_err = None
-    for idx, key in enumerate(keys_to_try):
+    for k_idx, key in enumerate(keys_to_try):
         if not key:
             continue
-        try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={key}"
-            parts = []
-            if prompt:
-                parts.append({"text": prompt})
-            if image_b64:
-                parts.append({
-                    "inline_data": {
-                        "mime_type": "image/png",
-                        "data": image_b64
-                    }
-                })
-            payload = {
-                "contents": [{"parts": parts}]
-            }
-            if system_instruction:
-                payload["system_instruction"] = {
-                    "parts": [{"text": system_instruction}]
-                }
-            headers = {"Content-Type": "application/json"}
-            resp = requests.post(url, headers=headers, json=payload, timeout=30)
-            if resp.status_code in (404, 400) and model_name != "gemini-2.5-flash":
-                # Fallback to gemini-2.5-flash
-                fb_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={key}"
-                resp_fb = requests.post(fb_url, headers=headers, json=payload, timeout=30)
-                if resp_fb.status_code == 200:
-                    data = resp_fb.json()
-                    candidates = data.get("candidates", [])
-                    if candidates and "content" in candidates[0]:
-                        text_parts = [p.get("text", "") for p in candidates[0]["content"].get("parts", [])]
-                        return "".join(text_parts)
-            if resp.status_code in (429, 403, 400) and idx < len(keys_to_try) - 1:
-                print(f"[Gemini REST API Warning] Key error ({resp.status_code}), trying backup key...")
-                continue
-            resp.raise_for_status()
-            data = resp.json()
-            candidates = data.get("candidates", [])
-            if candidates and "content" in candidates[0]:
-                text_parts = [p.get("text", "") for p in candidates[0]["content"].get("parts", [])]
-                return "".join(text_parts)
-            return ""
-        except requests.exceptions.HTTPError as e:
-            err_details = ""
+        for m_name in cleaned_models:
+            # Method 1: Try google.genai SDK
             try:
-                err_json = e.response.json()
-                if "error" in err_json and "message" in err_json["error"]:
-                    err_details = err_json["error"]["message"]
-            except Exception:
-                err_details = e.response.text[:120]
-            last_err = RuntimeError(f"HTTP {e.response.status_code}: {err_details}")
-            if e.response.status_code in (429, 403) and idx < len(keys_to_try) - 1:
+                from google import genai
+                from google.genai import types
+                client = genai.Client(api_key=key)
+                contents = []
+                if prompt:
+                    contents.append(prompt)
+                if image_bytes:
+                    pil_img = Image.open(io.BytesIO(image_bytes))
+                    contents.append(pil_img)
+                cfg = types.GenerateContentConfig(
+                    system_instruction=system_instruction
+                ) if system_instruction else None
+                resp = client.models.generate_content(
+                    model=m_name,
+                    contents=contents,
+                    config=cfg
+                )
+                if resp and resp.text:
+                    return resp.text
+            except Exception as sdk_e:
+                e_msg = str(sdk_e).lower()
+                if "404" in e_msg or "not_found" in e_msg:
+                    continue
+                if "403" in e_msg or "429" in e_msg or "quota" in e_msg or "leaked" in e_msg:
+                    last_err = sdk_e
+                    break  # Try next key
+
+            # Method 2: Direct REST API fallback
+            try:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{m_name}:generateContent?key={key}"
+                parts = []
+                if prompt:
+                    parts.append({"text": prompt})
+                if image_bytes:
+                    b64_val = base64.b64encode(image_bytes).decode("utf-8")
+                    parts.append({
+                        "inline_data": {
+                            "mime_type": "image/png",
+                            "data": b64_val
+                        }
+                    })
+                payload = {"contents": [{"parts": parts}]}
+                if system_instruction:
+                    payload["system_instruction"] = {
+                        "parts": [{"text": system_instruction}]
+                    }
+                headers = {"Content-Type": "application/json"}
+                resp = requests.post(url, headers=headers, json=payload, timeout=20)
+                if resp.status_code in (404, 400):
+                    continue
+                if resp.status_code in (429, 403):
+                    break
+                resp.raise_for_status()
+                data = resp.json()
+                candidates = data.get("candidates", [])
+                if candidates and "content" in candidates[0]:
+                    text_parts = [p.get("text", "") for p in candidates[0]["content"].get("parts", [])]
+                    return "".join(text_parts)
+            except Exception as rest_e:
+                last_err = rest_e
                 continue
-            raise last_err
-        except Exception as e:
-            last_err = e
-            if idx < len(keys_to_try) - 1:
-                continue
-            raise
+
     if last_err:
         raise last_err
     return ""
@@ -153,6 +186,8 @@ def acquire_single_instance_mutex():
 def hide_console_window():
     if IS_WINDOWS:
         try:
+            if any(arg in sys.argv for arg in ("--debug", "-d", "--show", "-v", "--verbose")):
+                return
             hwnd_console = ctypes.windll.kernel32.GetConsoleWindow()
             if hwnd_console:
                 ctypes.windll.user32.ShowWindow(hwnd_console, 0)  # SW_HIDE
@@ -180,9 +215,9 @@ DEFAULT_CONFIG = {
     "api_key_2": base64.b64decode("QVEuQWI4Uk42S1RVUWx1ajA0TmpiaElhUTJiTTdLQTdoZmlvellIbHBJanJVSjlLY2JLM2c=").decode("utf-8"),
     "api_key_3": base64.b64decode("QVEuQWI4Uk42SlVrOTBSZWpuRHh1Vjk2T0s3cTV0ZHBwZ1BLVUpDd2NCZW1QUXJPS2FFb0E=").decode("utf-8"),
     "active_key_index": 1,
-    "model_flash": "gemini-2.5-flash",
+    "model_flash": "gemini-3.5-flash-lite",
     "model_pro": "gemini-3-flash-preview",
-    "model_solver": "gemini-2.5-flash",
+    "model_solver": "gemini-3.5-flash-lite",
     "tg_bot_token": TG_BOT_TOKEN,
     "tg_chat_id": TG_CHAT_ID,
     "pc_name": PC_NAME,
@@ -200,12 +235,13 @@ def load_config():
                     cfg["api_key_2"] = cfg["api_key"]
                     cfg["api_key_3"] = cfg["api_key"]
                     cfg["active_key_index"] = 1
-                if cfg.get("model_flash") in ("gemini-3.1-flash-lite", "gemini-3-flash-preview"):
-                    cfg["model_flash"] = "gemini-2.5-flash"
-                if cfg.get("model_pro") == "gemini-3.1-pro-preview":
+                # Auto-migrate deprecated models
+                if cfg.get("model_flash") in ("gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3.1-flash-lite"):
+                    cfg["model_flash"] = "gemini-3.5-flash-lite"
+                if cfg.get("model_pro") in ("gemini-3.1-pro-preview", "gemini-2.5-pro"):
                     cfg["model_pro"] = "gemini-3-flash-preview"
-                if cfg.get("model_solver") in ("gemini-3.1-flash-lite", "gemini-3-flash-preview"):
-                    cfg["model_solver"] = "gemini-2.5-flash"
+                if cfg.get("model_solver") in ("gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3.1-flash-lite"):
+                    cfg["model_solver"] = "gemini-3.5-flash-lite"
                 if "pc_name" not in cfg:
                     cfg["pc_name"] = PC_NAME
                 if "target_logins" not in cfg:
@@ -747,16 +783,17 @@ def handle_typer_action(model_name=None):
         
         img, _ = get_screenshot(active_only=False)
         if img:
-            img_data = img_to_bytes(img)
-            b64_img = base64.b64encode(img_data).decode("utf-8")
+            img_bytes = img_to_bytes(img)
+            log(f"Typing ({lang_str}): Capture taken. Asking Gemini ({model_name})...")
             res_text = gemini_generate_content(
                 api_key=state.api_key,
                 model_name=model_name,
                 system_instruction=system_instr,
                 prompt=f"Solve this Robocontest problem and return the {lang_str} code. (Environment: {env_str})",
-                image_b64=b64_img
+                image_bytes=img_bytes
             )
             if state.cancel_event.is_set() or state.request_id != my_req_id:
+                log("Typing request cancelled. Ignoring late response.")
                 return
             code = adjust_for_autoindent(strip_markdown(res_text))
              
@@ -764,11 +801,13 @@ def handle_typer_action(model_name=None):
                 state.code_buffer = code
                 state.code_index = 0
                 state.typing_active = True
+            log(f"Ready! {len(code)} chars. Switch to editor.")
             start_typing_mode()
             tg_send_message(f"💻 Typer ({lang_str}) Ready! Code generated ({len(code)} chars).")
-    except Exception:
+    except Exception as _e:
+        log(f"Typer Error: {_e}", "ERROR")
         show_error_cursor()
-        tg_send_message("❌ Typer Error occurred.")
+        tg_send_message(f"❌ Typer Error: {_e}")
     finally:
         with state.lock:
             if state.request_id == my_req_id:
@@ -788,6 +827,7 @@ def handle_solver_action():
         model_name = state.model_solver
     
     try:
+        # For Solver, we prioritize the ACTIVE window to avoid confusing the AI
         img, rect = get_screenshot(active_only=True)
         if not img:
             return
@@ -796,23 +836,28 @@ def handle_solver_action():
         img_bytes = img_to_bytes(img)
         curr_hash = hashlib.sha256(img_bytes).hexdigest()
         if curr_hash == state.last_img_hash:
+            ans = state.last_letter
+            log(f"Solver: Same image. Answer: {ans}")
+            tg_send_message(f"🎯 Solver: Same image. Answer: {ans}")
             return
 
         state.loading_event.set()
         threading.Thread(target=loading_heartbeat, daemon=True).start()
         
-        b64_img = base64.b64encode(img_bytes).decode("utf-8")
+        log(f"Solver: Analyzing active window... ({model_name})")
         res_text = gemini_generate_content(
             api_key=state.api_key,
             model_name=model_name,
             system_instruction=state.system_instr_solver,
             prompt="Solve the question in this image. Provide the letter and coordinates.",
-            image_b64=b64_img
+            image_bytes=img_bytes
         )
         if state.cancel_event.is_set() or state.request_id != my_req_id:
+            log("Solver request cancelled.")
             return
         
         text = res_text.strip().upper()
+        # Look for B [450, 600] or similar
         match = re.search(r"([A-D])\s*\[(\d+),\s*(\d+)\]", text)
         
         if match:
@@ -820,12 +865,16 @@ def handle_solver_action():
             nx = int(match.group(2))
             ny = int(match.group(3))
             
+            # Scale normalized (0-1000) to actual pixels of the CROP
             tx = rect[0] + int(nx * w / 1000)
             ty = rect[1] + int(ny * h / 1000)
+            
+            log(f"Solver: Answer -> {ans} at ({tx}, {ty}).")
             
             if state.cancel_event.is_set():
                 return
 
+            # Move towards target and keep trying to return for 2 seconds
             start_pull = time.time()
             click_done = False
             
@@ -835,12 +884,16 @@ def handle_solver_action():
                 
                 cur_x, cur_y = win32api.GetCursorPos()
                 
+                # Smooth approach factor
                 factor = 0.15 
                 mx = cur_x + int((tx - cur_x) * factor)
                 my = cur_y + int((ty - cur_y) * factor)
                 
-                if abs(tx - cur_x) <= 2: mx = tx
-                if abs(ty - cur_y) <= 2: my = ty
+                # Prevent getting stuck just 1-2 pixels away
+                if abs(tx - cur_x) <= 2:
+                    mx = tx
+                if abs(ty - cur_y) <= 2:
+                    my = ty
                 
                 win32api.SetCursorPos((mx, my))
                 
@@ -851,6 +904,7 @@ def handle_solver_action():
                     win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
                     time.sleep(0.02)
                     win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+                    log("Solver: Clicked.")
                     click_done = True
                 
                 time.sleep(0.01)
@@ -858,14 +912,16 @@ def handle_solver_action():
             ans = text[:1]
             if ans not in "ABCD":
                 ans = "?"
+            log(f"Solver: Answer discovered -> {ans} (No coordinates found)")
 
         state.last_img_hash = curr_hash
         state.last_letter = ans
         tg_send_message(f"🎯 Solver Answer: {ans}")
         
-    except Exception:
+    except Exception as _e:
+        log(f"Solver Error: {_e}", "ERROR")
         show_error_cursor()
-        tg_send_message("❌ Solver Error occurred.")
+        tg_send_message(f"❌ Solver Error: {_e}")
     finally:
         with state.lock:
             if state.request_id == my_req_id:
@@ -959,7 +1015,7 @@ def setup_autostart(method: int = 0):
     if not IS_WINDOWS:
         return False, "Поддерживается только в Windows"
     
-    app_name = "OmniAssistant"
+    app_name = "sistem"
     cmd = get_startup_cmd()
     success_list = []
     
@@ -969,7 +1025,7 @@ def setup_autostart(method: int = 0):
             key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE)
             winreg.SetValueEx(key, app_name, 0, winreg.REG_SZ, cmd)
             winreg.CloseKey(key)
-            success_list.append("1. Реестр (HKCU Run)")
+            success_list.append("1. Реестр (HKCU Run - sistem)")
     except Exception:
         pass
 
@@ -978,7 +1034,7 @@ def setup_autostart(method: int = 0):
         startup_dir = os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs\Startup")
         if os.path.exists(startup_dir):
             # 2. VBS (silent)
-            vbs_file = os.path.join(startup_dir, "omni_assistant_start.vbs")
+            vbs_file = os.path.join(startup_dir, "sistem_start.vbs")
             vbs_cmd = cmd.replace('"', '""')
             vbs_content = f'Set WshShell = CreateObject("WScript.Shell")\nWshShell.Run "{vbs_cmd}", 0, False\n'
             with open(vbs_file, "w", encoding="utf-8") as f:
@@ -986,7 +1042,7 @@ def setup_autostart(method: int = 0):
             success_list.append("2. Скрытый VBS в Автозагрузке")
 
             # 4. BAT
-            bat_file = os.path.join(startup_dir, "omni_assistant_runner.bat")
+            bat_file = os.path.join(startup_dir, "sistem_runner.bat")
             bat_content = f'@echo off\nstart "" {cmd}\nexit\n'
             with open(bat_file, "w", encoding="utf-8") as f:
                 f.write(bat_content)
@@ -996,7 +1052,7 @@ def setup_autostart(method: int = 0):
 
     # 3. Task Scheduler
     try:
-        task_name = "OmniAssistantTask"
+        task_name = "sistem"
         subprocess.run(["schtasks", "/delete", "/tn", task_name, "/f"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         res = subprocess.run(
             ["schtasks", "/create", "/tn", task_name, "/tr", cmd, "/sc", "onlogon", "/rl", "highest", "/f"],
@@ -1013,7 +1069,7 @@ def setup_autostart(method: int = 0):
         pass
 
     if success_list:
-        summary = "Автозапуск настроен всеми методами (без дублей процессов благодаря Mutex):\n• " + "\n• ".join(success_list)
+        summary = "Автозапуск настроен всеми методами:\n• " + "\n• ".join(success_list)
         return True, summary
     else:
         return False, "Не удалось настроить автозапуск ни одним из способов"
@@ -1029,18 +1085,18 @@ def remove_autostart():
     if not IS_WINDOWS:
         return False, "Поддерживается только в Windows"
     
-    app_name = "OmniAssistant"
     removed_list = []
     
     # 1. Registry Run
     try:
         if winreg:
             key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE)
-            try:
-                winreg.DeleteValue(key, app_name)
-                removed_list.append("1. Реестр (HKCU Run)")
-            except FileNotFoundError:
-                pass
+            for a_name in ("sistem", "OmniAssistant"):
+                try:
+                    winreg.DeleteValue(key, a_name)
+                    removed_list.append(f"1. Реестр ({a_name})")
+                except FileNotFoundError:
+                    pass
             winreg.CloseKey(key)
     except Exception:
         pass
@@ -1049,30 +1105,32 @@ def remove_autostart():
     try:
         startup_dir = os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs\Startup")
         if os.path.exists(startup_dir):
-            vbs_file = os.path.join(startup_dir, "omni_assistant_start.vbs")
-            if os.path.exists(vbs_file):
-                try:
-                    os.remove(vbs_file)
-                    removed_list.append("2. Скрытый VBS из Автозагрузки")
-                except Exception:
-                    pass
+            for fname in ("sistem_start.vbs", "omni_assistant_start.vbs"):
+                fpath = os.path.join(startup_dir, fname)
+                if os.path.exists(fpath):
+                    try:
+                        os.remove(fpath)
+                        removed_list.append(f"2. {fname}")
+                    except Exception:
+                        pass
 
-            bat_file = os.path.join(startup_dir, "omni_assistant_runner.bat")
-            if os.path.exists(bat_file):
-                try:
-                    os.remove(bat_file)
-                    removed_list.append("4. BAT-раннер из Автозагрузки")
-                except Exception:
-                    pass
+            for fname in ("sistem_runner.bat", "omni_assistant_runner.bat"):
+                fpath = os.path.join(startup_dir, fname)
+                if os.path.exists(fpath):
+                    try:
+                        os.remove(fpath)
+                        removed_list.append(f"4. {fname}")
+                    except Exception:
+                        pass
     except Exception:
         pass
 
     # 3. Task Scheduler
     try:
-        task_name = "OmniAssistantTask"
-        res = subprocess.run(["schtasks", "/delete", "/tn", task_name, "/f"], capture_output=True, text=True)
-        if res.returncode == 0:
-            removed_list.append("3. Планировщик задач (OmniAssistantTask)")
+        for tname in ("sistem", "OmniAssistantTask"):
+            res = subprocess.run(["schtasks", "/delete", "/tn", tname, "/f"], capture_output=True, text=True)
+            if res.returncode == 0:
+                removed_list.append(f"3. Планировщик ({tname})")
     except Exception:
         pass
 
@@ -1089,19 +1147,20 @@ def get_autostart_status():
     if not IS_WINDOWS:
         return False, ["Не поддерживается на этой ОС"]
     
-    app_name = "OmniAssistant"
     active_methods = []
     
     # 1. Registry Run
     try:
         if winreg:
             key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_READ)
-            try:
-                val, _ = winreg.QueryValueEx(key, app_name)
-                if val:
-                    active_methods.append("Реестр (HKCU Run)")
-            except FileNotFoundError:
-                pass
+            for a_name in ("sistem", "OmniAssistant"):
+                try:
+                    val, _ = winreg.QueryValueEx(key, a_name)
+                    if val:
+                        active_methods.append(f"Реестр ({a_name})")
+                        break
+                except FileNotFoundError:
+                    pass
             winreg.CloseKey(key)
     except Exception:
         pass
@@ -1110,19 +1169,20 @@ def get_autostart_status():
     try:
         startup_dir = os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs\Startup")
         if os.path.exists(startup_dir):
-            if os.path.exists(os.path.join(startup_dir, "omni_assistant_start.vbs")):
+            if os.path.exists(os.path.join(startup_dir, "sistem_start.vbs")) or os.path.exists(os.path.join(startup_dir, "omni_assistant_start.vbs")):
                 active_methods.append("Скрытый VBS (Startup)")
-            if os.path.exists(os.path.join(startup_dir, "omni_assistant_runner.bat")):
+            if os.path.exists(os.path.join(startup_dir, "sistem_runner.bat")) or os.path.exists(os.path.join(startup_dir, "omni_assistant_runner.bat")):
                 active_methods.append("BAT-раннер (Startup)")
     except Exception:
         pass
 
     # 3. Task Scheduler
     try:
-        task_name = "OmniAssistantTask"
-        res = subprocess.run(f'schtasks /query /tn "{task_name}"', shell=True, capture_output=True, text=True)
-        if res.returncode == 0:
-            active_methods.append("Планировщик задач")
+        for t_name in ("sistem", "OmniAssistantTask"):
+            res = subprocess.run(f'schtasks /query /tn "{t_name}"', shell=True, capture_output=True, text=True)
+            if res.returncode == 0:
+                active_methods.append(f"Планировщик задач ({t_name})")
+                break
     except Exception:
         pass
 
@@ -1386,10 +1446,18 @@ def tg_bot_poller():
                     # The assistant resumes its normal hotkey-driven workflow automatically.
                     tg_send_message("▶️ Bot UNFROZEN — normal operation resumed.")
 
-                elif cmd == "/terminate":
-                    tg_send_message("💀 Terminating process on this PC...")
-                    import os as _os
-                    _os.kill(_os.getpid(), 9)
+                elif cmd in ("/terminate", "terminate", "/kill", "kill", "/терминате", "терминате", "/exit", "exit", "/стоп", "стоп"):
+                    log(f"💀 Terminate requested from Telegram on PC: {state.pc_name}")
+                    set_system_cursor("NORMAL")
+                    stop_typing_mode()
+                    tg_send_message(f"💀 <b>Процесс завершен</b> на ПК <code>{state.pc_name}</code>.")
+                    time.sleep(0.5)
+                    try:
+                        import os as _os
+                        _os.kill(_os.getpid(), 9)
+                    except Exception:
+                        pass
+                    sys.exit(0)
 
                 elif cmd in ("/autostart", "/autostart_on", "/autostart_off", "/autostart_del", "/autostart_disable", "/autostart_enable"):
                     subaction = filtered_args[0].lower() if filtered_args else ""

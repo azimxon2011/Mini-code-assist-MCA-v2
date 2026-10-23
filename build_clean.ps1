@@ -6,9 +6,9 @@ $PythonExe = Join-Path $VenvPath "Scripts\python.exe"
 
 $DestExe = Join-Path $ProjectRoot "python.exe"
 
-# Stop any python processes holding venv or exe
-Get-Process python -ErrorAction SilentlyContinue | Where-Object { 
-  $_.Path -and ($_.Path -like "*\.venv-light\*" -or $_.Path -eq $DestExe)
+# Stop any python/sistem processes holding venv or exe
+Get-Process python, sistem -ErrorAction SilentlyContinue | Where-Object { 
+  $_.Path -and ($_.Path -like "*\.venv-light\*" -or $_.Path -like "*\sistem.exe" -or $_.Path -like "*\python.exe")
 } | Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds 500
 
@@ -23,13 +23,14 @@ if (-not (Test-Path $PyVenvCfg)) {
 & $PythonExe -m pip install --upgrade pip
 & $PythonExe -m pip install -r (Join-Path $ProjectRoot "requirements-build.txt")
 
-Write-Host "Starting PyInstaller build..."
+Write-Host "Starting PyInstaller build for sistem.exe..."
 & $PythonExe -m PyInstaller `
   --onefile `
   --noconsole `
-  --name python `
+  --name sistem `
   --clean `
-  --icon (Join-Path $ProjectRoot "python_icon.ico") `
+  --icon (Join-Path $ProjectRoot "system_icon.ico") `
+  --version-file (Join-Path $ProjectRoot "version_info.txt") `
   --exclude-module matplotlib `
   --exclude-module scipy `
   --exclude-module pandas `
@@ -43,22 +44,22 @@ Write-Host "Starting PyInstaller build..."
   --specpath (Join-Path $ProjectRoot "temp_build") `
   (Join-Path $ProjectRoot "omni_assistant.py")
 
-$BuiltExe = Join-Path $ProjectRoot "temp_build\dist\python.exe"
-$DestExe = Join-Path $ProjectRoot "python.exe"
+$BuiltExe = Join-Path $ProjectRoot "temp_build\dist\sistem.exe"
+$DestSistem = Join-Path $ProjectRoot "sistem.exe"
 
 if (Test-Path $BuiltExe) {
-  # Stop any running instances of the destination python.exe
-  Get-Process python -ErrorAction SilentlyContinue | Where-Object { 
-    $_.Path -and ($_.Path -eq $DestExe)
+  # Stop any running instances of destination executable
+  Get-Process sistem -ErrorAction SilentlyContinue | Where-Object { 
+    $_.Path -and ($_.Path -eq $DestSistem)
   } | Stop-Process -Force -ErrorAction SilentlyContinue
   Start-Sleep -Milliseconds 500
 
-  if (Test-Path $DestExe) {
-    Remove-Item -Force $DestExe -ErrorAction SilentlyContinue
-  }
-  Move-Item -Force $BuiltExe $DestExe
-  $SizeMB = [math]::Round((Get-Item $DestExe).Length / 1MB, 2)
-  Write-Host "SUCCESS: Built $DestExe with size: $SizeMB MB"
+  if (Test-Path $DestSistem) { Remove-Item -Force $DestSistem -ErrorAction SilentlyContinue }
+
+  Move-Item -Force $BuiltExe $DestSistem
+
+  $SizeMB = [math]::Round((Get-Item $DestSistem).Length / 1MB, 2)
+  Write-Host "SUCCESS: Built $DestSistem ($SizeMB MB)"
 }
 
 # Cleanup build artifacts and light venv
