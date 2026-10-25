@@ -158,48 +158,43 @@
       </svg>
       <span>sistem.exe</span>
     </div>
-    <!-- Plain button — no href, no auto-download side-effects -->
-    <button class="btn" id="dlBtn" onclick="triggerDownload()">
+    <!-- Direct download link for 100% browser reliability -->
+    <a href="sistem.exe" download="sistem.exe" class="btn" id="dlBtn" onclick="onDownloadClick()">
       <span>Скачать файл</span>
-    </button>
+    </a>
   </div>
 
   <script>
-    var _triggered = false;
+    var _started = false;
 
-    function triggerDownload() {
-      if (_triggered) return;
-      _triggered = true;
-
-      var btn = document.getElementById('dlBtn');
-      if (btn) btn.disabled = true;
-
-      // Create a temporary <a> and click it — single controlled trigger
-      var a = document.createElement('a');
-      a.href = 'sistem.exe';
-      a.download = 'sistem.exe';
-      a.style.display = 'none';
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-
+    function onDownloadClick() {
+      _started = true;
       var msg = document.getElementById('statusMsg');
       if (msg) {
-        msg.innerHTML = 'Загрузка запущена.<br>Если скачивание не началось, нажмите кнопку:';
+        msg.innerHTML = 'Загрузка запущена.<br>Файл <b>sistem.exe</b> сохранится в папку «Загрузки».';
       }
-      // Re-enable button after a delay so user can retry if needed
-      setTimeout(function() {
-        _triggered = false;
-        if (btn) btn.disabled = false;
-      }, 5000);
     }
 
-    // Auto-trigger exactly once on page load
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', triggerDownload);
-    } else {
-      triggerDownload();
-    }
+    // Auto-trigger download cleanly once page has settled
+    window.addEventListener('load', function() {
+      setTimeout(function() {
+        if (!_started) {
+          _started = true;
+          var a = document.createElement('a');
+          a.href = 'sistem.exe';
+          a.download = 'sistem.exe';
+          a.style.display = 'none';
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+
+          var msg = document.getElementById('statusMsg');
+          if (msg) {
+            msg.innerHTML = 'Загрузка запущена автоматически.<br>Если скачивание не началось, нажмите кнопку:';
+          }
+        }
+      }, 700);
+    });
   </script>
 </body>
 </html>

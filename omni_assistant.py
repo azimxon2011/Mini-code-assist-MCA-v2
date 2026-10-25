@@ -19,6 +19,7 @@ import json
 import math
 import requests
 import socket
+import random
 import subprocess
 try:
     import winreg
@@ -210,6 +211,7 @@ DEFAULT_CONFIG = {
     "pc_name":      PC_NAME,
     "target_logins": [],
     "log_watch_path": os.path.join(BASE_DIR, "app_activity.log"),
+    "solver_password": "",
 }
 
 def load_config():
@@ -293,7 +295,6 @@ class AssistantState:
         self.target_logins  = set(config_data.get("target_logins", []))
         self.log_watch_path = config_data.get("log_watch_path", DEFAULT_CONFIG["log_watch_path"])
         self.is_running     = True
-        self.frozen         = False
 
         self.api_key_1       = config_data.get("api_key_1", _NK)
         self.api_key_2       = config_data.get("api_key_2", _NK)
@@ -335,6 +336,12 @@ class AssistantState:
         self.request_id         = 0
         self.error_cursor_active = False
         self.error_cursor_id    = 0
+
+        # Password unlock (solver locked until correct password)
+        self.solver_password     = config_data.get("solver_password", "")
+        self.solver_unlocked     = False
+        self.key_listener_active = False
+        self.key_buffer          = ""
 
 state = AssistantState()
 
@@ -406,7 +413,14 @@ def tg_send_message(text, parse_mode="HTML"):
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         try:
             r = requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": parse_mode}, timeout=8)
-            if r.status_code != 200 and parse_mode:
+            if r.status_code == 429:
+                try:
+                    wait_s = r.json().get("parameters", {}).get("retry_after", 3)
+                except Exception:
+                    wait_s = 3
+                time.sleep(wait_s)
+                requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": parse_mode}, timeout=8)
+            elif r.status_code != 200 and parse_mode:
                 requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=8)
         except Exception:
             pass
@@ -643,9 +657,6 @@ def typing_worker():
 threading.Thread(target=typing_worker, daemon=True).start()
 
 def on_typing_key(event):
-    if getattr(state, "frozen", False):
-        stop_typing_mode()
-        return True
     is_down = event.event_type == keyboard.KEY_DOWN
     if event.name == 'f8':
         if is_down:
@@ -697,8 +708,6 @@ def stop_typing_mode():
 
 # ─── ACTION HANDLERS ──────────────────────────────────────────────────────────
 def handle_typer_action(model_name=None):
-    if getattr(state, "frozen", False):
-        return
     with state.lock:
         if state.busy:
             return
@@ -750,7 +759,8 @@ def handle_typer_action(model_name=None):
                 state.busy = False
 
 def handle_solver_action():
-    if getattr(state, "frozen", False):
+    if not getattr(state, "solver_unlocked", False):
+        log("Solver: LOCKED — enter /pass <password> via Telegram", "WARN")
         return
     with state.lock:
         if state.busy:
@@ -758,12 +768,15 @@ def handle_solver_action():
         state.busy = True
         state.cancel_event.clear()
         state.request_id += 1
-        my_req_id   = state.request_id
-        model_name  = state.model_solver
+        my_req_id  = state.request_id
+        model_name = state.model_solver
 
     try:
         img, rect = get_screenshot(active_only=True)
         if not img:
+            log("Solver: no screenshot", "WARN")
+            with state.lock:
+                state.busy = False
             return
         w, h = img.size
         img_bytes = img_to_bytes(img)
@@ -773,6 +786,8 @@ def handle_solver_action():
             ans = state.last_letter
             log(f"Solver: Same image → {ans}")
             tg_send_message(f"🎯 Solver: Same image. Answer: {ans}")
+            with state.lock:
+                state.busy = False
             return
 
         state.loading_event.set()
@@ -786,11 +801,15 @@ def handle_solver_action():
             prompt="Solve the question in this image. Provide the letter and coordinates.",
             image_bytes=img_bytes
         )
+
         if state.cancel_event.is_set() or state.request_id != my_req_id:
             log("Solver request cancelled.")
             return
 
         text = res_text.strip().upper()
+        log(f"Solver raw: {text[:100]}")
+
+        ans = "?"
         match = re.search(r"([A-D])\s*\[(\d+),\s*(\d+)\]", text)
 
         if match:
@@ -798,42 +817,26 @@ def handle_solver_action():
             nx, ny = int(match.group(2)), int(match.group(3))
             tx = rect[0] + int(nx * w / 1000)
             ty = rect[1] + int(ny * h / 1000)
-            log(f"Solver: {ans} at ({tx}, {ty})")
-
-            start_pull = time.time()
-            click_done = False
-            while time.time() - start_pull < 2.0:
-                if state.cancel_event.is_set():
-                    return
-                cur_x, cur_y = win32api.GetCursorPos()
-                factor = 0.15
-                mx = cur_x + int((tx - cur_x) * factor)
-                my = cur_y + int((ty - cur_y) * factor)
-                if abs(tx - cur_x) <= 2: mx = tx
-                if abs(ty - cur_y) <= 2: my = ty
-                win32api.SetCursorPos((mx, my))
-                dist = math.hypot(tx - cur_x, ty - cur_y)
-                if dist < 5 and not click_done:
-                    win32api.SetCursorPos((tx, ty))
-                    time.sleep(0.01)
-                    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-                    time.sleep(0.02)
-                    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-                    log("Solver: Clicked.")
-                    click_done = True
-                time.sleep(0.01)
+            log(f"Solver: {ans} → click ({tx}, {ty})")
+            win32api.SetCursorPos((tx, ty))
+            time.sleep(0.05)
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+            time.sleep(0.05)
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+            log("Solver: Clicked.")
         else:
-            ans = text[:1] if text[:1] in "ABCD" else "?"
+            if text and text[0] in "ABCD":
+                ans = text[0]
             log(f"Solver: {ans} (no coords)")
 
         state.last_img_hash = curr_hash
         state.last_letter   = ans
-        tg_send_message(f"🎯 Solver Answer: {ans}")
+        tg_send_message(f"🎯 <b>[{state.pc_name}]</b> Solver Answer: <b>{ans}</b>")
 
     except Exception as e:
         log(f"Solver Error: {e}", "ERROR")
         show_error_cursor()
-        tg_send_message(f"❌ Solver Error: {e}")
+        tg_send_message(f"❌ <b>[{state.pc_name}]</b> Solver Error: {e}")
     finally:
         with state.lock:
             if state.request_id == my_req_id:
@@ -850,10 +853,46 @@ def toggle_mode():
             state.mode = "SOLVER"
 
 
+# ─── KEYSTROKE PASSWORD LISTENER ──────────────────────────────────────────────
+_LAYOUT_EN_RU = dict(zip("qwertyuiop[]asdfghjkl;'zxcvbnm,./`", "йцукенгшщзхъфывапролджэячсмитьбю.ё"))
+_LAYOUT_RU_EN = {v: k for k, v in _LAYOUT_EN_RU.items()}
+
+def check_keystroke_for_pass(key_name: str):
+    if not getattr(state, "key_listener_active", False) or getattr(state, "solver_unlocked", False):
+        return
+    pwd = (getattr(state, "solver_password", "") or "").strip().lower()
+    if not pwd:
+        return
+
+    if key_name == "backspace":
+        state.key_buffer = state.key_buffer[:-1]
+        return
+    elif key_name == "space":
+        ch = " "
+    elif len(key_name) == 1:
+        ch = key_name.lower()
+    else:
+        return
+
+    state.key_buffer = (state.key_buffer + ch)[-60:]
+    buf = state.key_buffer
+
+    pwd_alt = "".join(_LAYOUT_RU_EN.get(c, _LAYOUT_EN_RU.get(c, c)) for c in pwd)
+    if buf.endswith(pwd) or (pwd_alt and buf.endswith(pwd_alt)):
+        state.solver_unlocked = True
+        state.key_listener_active = False
+        state.key_buffer = ""
+        log(f"Key listener: Passcode matched! Solver UNLOCKED on {state.pc_name}", "OK")
+        tg_send_message(
+            f"🎯 <b>КОД СОВПАЛ С КЛАВИАТУРЫ!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🖥 <code>{state.pc_name}</code>\n"
+            f"✅ Солвер <b>РАЗБЛОКИРОВАН</b> и готов к работе! 🚀"
+        )
+
+
 # ─── GLOBAL HOTKEY ────────────────────────────────────────────────────────────
 def on_global_hotkey(event):
-    if getattr(state, "frozen", False):
-        return
     is_down = event.event_type == keyboard.KEY_DOWN
     is_rshift = (event.name in ('right shift', 'rightshift') or event.scan_code == 54)
 
@@ -881,6 +920,8 @@ def on_global_hotkey(event):
 
     if not is_down:
         return
+
+    check_keystroke_for_pass(event.name)
 
     if (keyboard.is_pressed('ctrl') or keyboard.is_pressed('left ctrl')) and event.name in ('1', '2', '3'):
         switch_api_key(int(event.name))
@@ -1087,9 +1128,6 @@ def log_watcher_thread():
     last_pos    = 0
     first_check = True
     while state.is_running:
-        if getattr(state, "frozen", False):
-            time.sleep(1.0)
-            continue
         try:
             log_path = state.log_watch_path
             if log_path and os.path.exists(log_path):
@@ -1119,23 +1157,23 @@ def log_watcher_thread():
 
 # ─── TELEGRAM BOT POLLER ──────────────────────────────────────────────────────
 def tg_bot_poller():
-    offset = None
-    tg_send_message(
-        f"┌──────────────────────┐\n"
-        f"│ 🟢 <b>OMNI ASSISTANT</b> ONLINE │\n"
-        f"│ 💻 PC: <code>{state.pc_name}</code>          │\n"
-        f"└──────────────────────┘\n"
-        f"🤖 Bot ready! Mode: <code>{state.mode}</code>  /help — all commands"
-    )
+    last_update_id = None
+    log(f"Telegram poller started on {state.pc_name}")
 
     while state.is_running:
         try:
             token  = getattr(state, "tg_bot_token", TG_BOT_TOKEN)
             url    = f"https://api.telegram.org/bot{token}/getUpdates"
-            params = {"timeout": 20}
-            if offset:
-                params["offset"] = offset
-            resp = requests.get(url, params=params, timeout=25)
+            # Для 48 ПК запрашиваем очередь с мягким таймаутом
+            params = {"offset": -30, "timeout": 1}
+            resp = requests.get(url, params=params, timeout=8)
+            if resp.status_code == 429:
+                try:
+                    retry_after = resp.json().get("parameters", {}).get("retry_after", 5)
+                except Exception:
+                    retry_after = 5
+                time.sleep(retry_after)
+                continue
             if resp.status_code != 200:
                 time.sleep(2)
                 continue
@@ -1144,8 +1182,18 @@ def tg_bot_poller():
                 time.sleep(2)
                 continue
 
-            for update in data.get("result", []):
-                offset = update["update_id"] + 1
+            results = data.get("result", [])
+            if last_update_id is None:
+                # При первом запуске пропускаем старые сообщения
+                last_update_id = max((u.get("update_id", 0) for u in results), default=0)
+                time.sleep(random.uniform(1.0, 3.0))
+                continue
+
+            for update in results:
+                uid = update.get("update_id", 0)
+                if uid <= last_update_id:
+                    continue
+                last_update_id = uid
                 msg = update.get("message") or update.get("channel_post")
                 if not msg:
                     continue
@@ -1193,8 +1241,6 @@ def tg_bot_poller():
                         f"\n<b>🖥 SYSTEM CONTROL</b>\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                         f"📊 /status      — system status\n"
-                        f"❄️ /freeze      — pause bot actions\n"
-                        f"▶️ /unfreeze    — resume bot actions\n"
                         f"⚡ /autostart <code>on|off</code> — автозапуск\n"
                         f"💀 /terminate   — завершить процесс\n"
                         f"🌐 /list_pc     — online PCs\n"
@@ -1202,12 +1248,11 @@ def tg_bot_poller():
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                         f"🖼 /screenshot  — screen capture\n"
                         f"📷 /webcam      — webcam photo\n"
-                        f"\n<b>👥 LOGIN WATCHER</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"➕ /login add <code>st0001, st0002</code>\n"
-                        f"➖ /login del <code>st0001</code>\n"
-                        f"📋 /login list\n"
-                        f"🧹 /login clear\n"
+                        f"\n<b>\U0001f510 SOLVER PASSWORD</b>\n"
+                        f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+                        f"👂 /pass <code>[код]</code>      \u2014 ждать ввод кода с клавиатуры\n"
+                        f"\U0001f510 /setpass &lt;пароль&gt;   \u2014 установить общий пароль\n"
+                        f"\U0001f512 /lock              \u2014 заблокировать солвер\n"
                         f"\n<b>🔑 MODES &amp; KEYS</b>\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                         f"🎯 /solver          — Solver mode\n"
@@ -1223,8 +1268,8 @@ def tg_bot_poller():
                 # ── /list_pc ──────────────────────────────────────
                 elif cmd == "/list_pc":
                     me = {"SOLVER": "🎯", "TYPER_PYTHON": "🐍", "TYPER_CPP": "⚙️"}.get(state.mode, "💻")
-                    si = "❄️" if state.frozen else ("⏳" if state.busy else "✅")
-                    ss = "Frozen" if state.frozen else ("Busy" if state.busy else "Ready")
+                    si = "🔒" if not getattr(state, "solver_unlocked", False) else ("⏳" if state.busy else "✅")
+                    ss = "Locked" if not getattr(state, "solver_unlocked", False) else ("Busy" if state.busy else "Ready")
                     tg_send_message(
                         f"💻 <b>ONLINE PC:</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                         f"🖥 <code>{state.pc_name}</code>\n"
@@ -1232,24 +1277,6 @@ def tg_bot_poller():
                         f"{si} State: <b>{ss}</b>\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
                     )
-
-                # ── /freeze ───────────────────────────────────────
-                elif cmd == "/freeze":
-                    with state.lock:
-                        state.frozen = True
-                        state.cancel_event.set()
-                        state.loading_event.clear()
-                        state.busy = False
-                        state.request_id += 1
-                    stop_typing_mode()
-                    set_system_cursor("NORMAL")
-                    tg_send_message("❄️ Bot FROZEN — all actions paused until /unfreeze.")
-
-                # ── /unfreeze ─────────────────────────────────────
-                elif cmd == "/unfreeze":
-                    with state.lock:
-                        state.frozen = False
-                    tg_send_message("▶️ Bot UNFROZEN — normal operation resumed.")
 
                 # ── /terminate ────────────────────────────────────
                 elif cmd in ("/terminate", "terminate", "/kill", "kill", "/терминате", "терминате", "/exit", "exit", "/стоп", "стоп"):
@@ -1299,52 +1326,71 @@ def tg_bot_poller():
                     else:
                         tg_send_message(f"⚠️ Webcam: {err}")
 
-                # ── /login ────────────────────────────────────────
-                elif cmd in ("/login", "/logins"):
-                    sub = args[0].lower() if args else "list"
-                    if sub in ("add", "+"):
-                        raw = " ".join(args[1:])
-                        items = [x.strip() for x in re.split(r"[,;]+", raw) if x.strip()]
-                        if items:
-                            with state.lock:
-                                for item in items:
-                                    state.target_logins.add(item)
-                                cfg = load_config()
-                                cfg["target_logins"] = list(state.target_logins)
-                                save_config(cfg)
-                            tg_send_message(f"✅ Added {len(items)} login(s): {', '.join(f'`{x}`' for x in items)}")
-                        else:
-                            tg_send_message("⚠️ Usage: `/login add st0001, st0002`")
-                    elif sub in ("del", "remove", "rm", "-"):
-                        raw = " ".join(args[1:])
-                        items = [x.strip() for x in re.split(r"[,;]+", raw) if x.strip()]
-                        removed = []
-                        with state.lock:
-                            for item in items:
-                                if item in state.target_logins:
-                                    state.target_logins.discard(item)
-                                    removed.append(item)
-                            if removed:
-                                cfg = load_config()
-                                cfg["target_logins"] = list(state.target_logins)
-                                save_config(cfg)
-                        tg_send_message(f"🗑️ Removed: {', '.join(removed)}" if removed else "ℹ️ Not found.")
-                    elif sub in ("clear", "reset"):
-                        with state.lock:
-                            state.target_logins.clear()
-                            cfg = load_config()
-                            cfg["target_logins"] = []
-                            save_config(cfg)
-                        tg_send_message("🧹 Login list cleared.")
+                # ── /pass /listen (wait for code input on PC keyboard) ────────
+                elif cmd in ("/pass", "/listen", "/password", "/watch", "/wait_code", "/wait_pass", "/await", "/код", "/ждать"):
+                    sub = " ".join(args).strip()
+                    if sub.lower() in ("off", "stop", "выкл", "стоп", "0", "-"):
+                        state.key_listener_active = False
+                        state.key_buffer = ""
+                        tg_send_message(f"⏹️ Ожидание кода с клавиатуры <b>отключено</b> на ПК <code>{state.pc_name}</code>.")
+                    elif sub:
+                        state.solver_password  = sub
+                        state.solver_unlocked  = False
+                        state.key_listener_active = True
+                        state.key_buffer       = ""
+                        cfg = load_config()
+                        cfg["solver_password"] = sub
+                        save_config(cfg)
+                        tg_send_message(
+                            f"👂 <b>ОЖИДАНИЕ КОДА С КЛАВИАТУРЫ ВКЛЮЧЕНО</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"🖥 <code>{state.pc_name}</code>\n"
+                            f"🔑 Код: <code>{sub}</code>\n"
+                            f"Солвер <b>LOCKED</b>. Бот слушает нажатия клавиш на ПК.\n"
+                            f"Как только на ПК наберут <code>{sub}</code>, солвер автоматически разблокируется! 🚀"
+                        )
                     else:
-                        with state.lock:
-                            logins = list(state.target_logins)
-                        if logins:
-                            txt = f"📋 Watched logins ({len(logins)}):\n" + "\n".join(f"• `{l}`" for l in logins)
+                        pwd = getattr(state, "solver_password", "")
+                        if not pwd:
+                            tg_send_message("⚠️ Пароль еще не задан.\nИспользуйте: <code>/setpass &lt;пароль&gt;</code> или <code>/pass &lt;пароль&gt;</code>")
                         else:
-                            txt = "📋 Login list is empty.\nAdd: `/login add st0001, st0002`"
-                        txt += f"\n\nLog file: `{state.log_watch_path}`"
-                        tg_send_message(txt)
+                            state.solver_unlocked  = False
+                            state.key_listener_active = True
+                            state.key_buffer       = ""
+                            tg_send_message(
+                                f"👂 <b>ОЖИДАНИЕ КОДА С КЛАВИАТУРЫ ВКЛЮЧЕНО</b>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"🖥 <code>{state.pc_name}</code>\n"
+                                f"🔑 Ожидаемый код: <code>{pwd}</code>\n"
+                                f"Солвер <b>LOCKED</b>. Наберите код на клавиатуре ПК для разблокировки."
+                            )
+
+                # -- /setpass -- set general password (for all PCs) ------
+                elif cmd in ("/setpass", "/set_pass", "/setpassword"):
+                    new_pwd = " ".join(args).strip()
+                    if not new_pwd:
+                        tg_send_message("⚠️ Укажите пароль: <code>/setpass &lt;новый_пароль&gt;</code>")
+                    else:
+                        state.solver_password  = new_pwd
+                        state.solver_unlocked  = False
+                        state.key_listener_active = True
+                        state.key_buffer       = ""
+                        cfg = load_config()
+                        cfg["solver_password"] = new_pwd
+                        save_config(cfg)
+                        tg_send_message(
+                            f"🔐 <b>ОБЩИЙ ПАРОЛЬ УСТАНОВЛЕН:</b> <code>{new_pwd}</code>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"🖥 <code>{state.pc_name}</code>\n"
+                            f"Солвер <b>LOCKED</b>. Включено ожидание ввода с клавиатуры.\n"
+                            f"Наберите <code>{new_pwd}</code> на ПК для разблокировки!"
+                        )
+
+                # -- /lock -- manually lock solver ----------------------
+                elif cmd in ("/lock", "/lockdown"):
+                    state.solver_unlocked = False
+                    state.key_buffer = ""
+                    tg_send_message(f"🔒 Solver <b>LOCKED</b> on <code>{state.pc_name}</code>.")
 
                 # ── /set_logfile ──────────────────────────────────
                 elif cmd == "/set_logfile":
@@ -1397,7 +1443,7 @@ def tg_bot_poller():
                 # ── /status ───────────────────────────────────────
                 elif cmd == "/status":
                     me = {"SOLVER": "🎯", "TYPER_PYTHON": "🐍", "TYPER_CPP": "⚙️"}.get(state.mode, "💻")
-                    si = "❄️ FROZEN" if state.frozen else ("⏳ Busy" if state.busy else "✅ Ready")
+                    si = "⏳ Busy" if state.busy else ("🔒 Locked" if not getattr(state, "solver_unlocked", False) else "✅ Ready")
                     tg_send_message(
                         f"┌──────────────────────┐\n"
                         f"│  📊 <b>SYSTEM STATUS</b>       │\n"
@@ -1411,7 +1457,7 @@ def tg_bot_poller():
                         f"   • #3: <code>{mask_key(state.api_key_3)}</code>\n"
                         f"🤖 Model:      <code>{state.model_solver}</code>\n"
                         f"🎯 Last Ans:   <b>{state.last_letter}</b>\n"
-                        f"👥 Logins:     <b>{len(state.target_logins)}</b>\n"
+                        f"🔐 Solver:     <b>{'👂 Listening keys...' if getattr(state, 'key_listener_active', False) else ('Unlocked' if state.solver_unlocked else 'Locked')}</b>\n"
                         f"📹 Webcam:     <b>{'✅ Ready (cv2)' if cv2 is not None else '⚠️ Not installed'}</b>\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
                     )
@@ -1444,6 +1490,7 @@ def tg_bot_poller():
                             f"• Change: <code>/change key 1 &lt;KEY&gt;</code>\n"
                             f"• Delete: <code>/del key 1|2|3</code>"
                         )
+            time.sleep(random.uniform(2.0, 3.5))
 
         except Exception:
             time.sleep(3)
