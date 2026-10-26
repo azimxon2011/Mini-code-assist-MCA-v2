@@ -75,7 +75,7 @@ Write-Host ""
 Write-Host ">>> Committing and pushing to git..."
 Set-Location $ProjectRoot
 
-git add sistem.exe python.exe omni_assistant.py index.html vercel.json build_clean.ps1 build.py config.json version_info.txt
+git add sistem.exe python.exe omni_assistant.py index.html vercel.json .vercelignore build_clean.ps1 build.py config.json version_info.txt
 git add requirements*.txt
 
 $CommitMsg = "build: update sistem.exe $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
