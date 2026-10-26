@@ -69,14 +69,28 @@ def gemini_generate_content(api_key, model_name, system_instruction, prompt, ima
         except Exception:
             pass
 
-    models_to_try = [model_name, "gemini-3.5-flash-lite", "gemini-3.5-flash",
-                     "gemini-3-flash-preview", "gemini-3.8-flash", "gemini-2.5-flash", "gemini-flash-latest"]
+    # Use verified high-accuracy models, filtering out any obsolete or non-existent model tags
+    models_to_try = [
+        model_name,
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-1.5-pro",
+        "gemini-flash-latest"
+    ]
     cleaned = []
     seen = set()
     for m in models_to_try:
-        if m and m not in seen:
+        if not m:
+            continue
+        m = m.strip()
+        if any(bad in m for bad in ("3.5", "3.8", "3-flash-preview")):
+            continue
+        if m not in seen:
             seen.add(m)
             cleaned.append(m)
+    if not cleaned:
+        cleaned = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
 
     last_err = None
     for key in keys_to_try:
@@ -94,19 +108,26 @@ def gemini_generate_content(api_key, model_name, system_instruction, prompt, ima
                 if image_bytes:
                     pil_img = Image.open(io.BytesIO(image_bytes))
                     contents.append(pil_img)
-                cfg = types.GenerateContentConfig(system_instruction=system_instruction) if system_instruction else None
+                cfg = types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    temperature=0.1,
+                    top_p=0.95
+                ) if system_instruction else types.GenerateContentConfig(temperature=0.1, top_p=0.95)
                 resp = client.models.generate_content(model=m_name, contents=contents, config=cfg)
                 if resp and resp.text:
+                    if st and getattr(st, "api_key", None) != key:
+                        with st.lock:
+                            st.api_key = key
                     return resp.text
             except Exception as sdk_e:
                 e_msg = str(sdk_e).lower()
                 if "404" in e_msg or "not_found" in e_msg:
                     continue
-                if "403" in e_msg or "429" in e_msg or "quota" in e_msg or "leaked" in e_msg:
+                if "401" in e_msg or "403" in e_msg or "429" in e_msg or "quota" in e_msg or "leaked" in e_msg:
                     last_err = sdk_e
                     break
 
-            # Method 2: REST API
+            # Method 2: High-speed REST API (temperature=0.1 for maximum reasoning accuracy)
             try:
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{m_name}:generateContent?key={key}"
                 parts = []
@@ -115,21 +136,36 @@ def gemini_generate_content(api_key, model_name, system_instruction, prompt, ima
                 if image_bytes:
                     b64_val = base64.b64encode(image_bytes).decode("utf-8")
                     parts.append({"inline_data": {"mime_type": "image/png", "data": b64_val}})
-                payload = {"contents": [{"parts": parts}]}
+                payload = {
+                    "contents": [{"parts": parts}],
+                    "generationConfig": {
+                        "temperature": 0.1,
+                        "topP": 0.95
+                    }
+                }
                 if system_instruction:
                     payload["system_instruction"] = {"parts": [{"text": system_instruction}]}
-                resp = requests.post(url, headers={"Content-Type": "application/json"}, json=payload, timeout=25)
+                resp = requests.post(
+                    url,
+                    headers={"Content-Type": "application/json", "x-goog-api-key": key},
+                    json=payload,
+                    timeout=25
+                )
                 if resp.status_code in (404, 400):
                     continue
-                if resp.status_code in (429, 403):
-                    last_err = Exception(f"HTTP {resp.status_code}")
+                if resp.status_code in (401, 403, 429):
+                    last_err = Exception(f"HTTP {resp.status_code}: {resp.text[:120]}")
                     break
                 resp.raise_for_status()
                 data = resp.json()
                 candidates = data.get("candidates", [])
                 if candidates and "content" in candidates[0]:
                     text_parts = [p.get("text", "") for p in candidates[0]["content"].get("parts", [])]
-                    return "".join(text_parts)
+                    ans_text = "".join(text_parts)
+                    if st and getattr(st, "api_key", None) != key:
+                        with st.lock:
+                            st.api_key = key
+                    return ans_text
             except Exception as rest_e:
                 last_err = rest_e
                 continue
@@ -228,9 +264,9 @@ DEFAULT_CONFIG = {
     "api_key_2": _NK,
     "api_key_3": _NK,
     "active_key_index": 1,
-    "model_flash":  "gemini-3.5-flash-lite",
-    "model_pro":    "gemini-3-flash-preview",
-    "model_solver": "gemini-3.5-flash-lite",
+    "model_flash":  "gemini-2.5-flash",
+    "model_pro":    "gemini-1.5-pro",
+    "model_solver": "gemini-2.5-flash",
     "tg_bot_token": TG_BOT_TOKEN,
     "tg_chat_id":   TG_CHAT_ID,
     "pc_name":      PC_NAME,
@@ -299,13 +335,18 @@ TYPER_CPP_INSTRUCTION = (
 )
 
 SOLVER_INSTRUCTION = (
-    "You are an Elite Solver. Analyze the image and solve the question.\n"
-    "1. Reason step-by-step internally to find the correct option (A, B, C, or D).\n"
-    "2. Locate the EXACT center coordinates [X, Y] of the letter or its bubble.\n"
-    "3. Output ONLY the result in this format: LETTER [X, Y]\n"
-    "Example: C [500, 750]\n"
-    "IMPORTANT: X and Y must be normalized (0-1000) relative to the image. 0,0 is top-left.\n"
-    "If an answer is already marked, verify its correctness. Output ONLY the answer string."
+    "You are an Elite Academic and Competitive Test Solver with 100% precision in test questions, coding, math, and logic.\n"
+    "TASK:\n"
+    "1. Thoroughly read and analyze the entire problem, question text, diagram, or code snippet.\n"
+    "2. Compare each option (A, B, C, D) carefully. Verify correctness and discard traps.\n"
+    "3. Determine the strictly correct answer.\n"
+    "4. Find the exact center coordinates [X, Y] (normalized 0-1000 relative to the image, 0,0 is top-left) of the clickable circle/checkbox or text for the correct option.\n"
+    "5. Format your output as:\n"
+    "Step: <brief 1-sentence reasoning>\n"
+    "ANSWER: <LETTER> [<X>, <Y>]\n"
+    "Example:\n"
+    "Step: Option B is correct because 2^10 = 1024.\n"
+    "ANSWER: B [450, 680]"
 )
 
 
@@ -543,7 +584,7 @@ def get_screenshot(active_only=True):
             hwnd = win32gui.GetForegroundWindow()
             if hwnd:
                 rect = win32gui.GetWindowRect(hwnd)
-                if rect[2] > rect[0] and rect[3] > rect[1]:
+                if (rect[2] - rect[0] >= 300) and (rect[3] - rect[1] >= 200):
                     img = ImageGrab.grab(bbox=rect, all_screens=True)
                     return img, rect
         img = ImageGrab.grab(all_screens=True)
@@ -833,7 +874,7 @@ def handle_solver_action():
             api_key=state.api_key,
             model_name=model_name,
             system_instruction=state.system_instr_solver,
-            prompt="Solve the question in this image. Provide the letter and coordinates.",
+            prompt="Carefully solve this question with 100% accuracy. Discard traps and end with ANSWER: LETTER [X, Y].",
             image_bytes=img_bytes
         )
 
@@ -841,27 +882,35 @@ def handle_solver_action():
             log("Solver request cancelled.")
             return
 
-        text = res_text.strip().upper()
-        log(f"Solver raw: {text[:100]}")
+        text = res_text.strip()
+        log(f"Solver raw: {text[:140]}")
 
         ans = "?"
-        match = re.search(r"([A-D])\s*\[(\d+),\s*(\d+)\]", text)
+        # Match ANSWER: LETTER [X, Y] or LETTER [X, Y] (takes the last concluding match)
+        matches = list(re.finditer(r"(?:ANSWER\s*:\s*)?([A-D])\s*(?:[:\-\s]+)?\[(\d+),\s*(\d+)\]", text, re.IGNORECASE))
 
-        if match:
-            ans = match.group(1)
-            nx, ny = int(match.group(2)), int(match.group(3))
+        if matches:
+            last_match = matches[-1]
+            ans = last_match.group(1).upper()
+            nx, ny = int(last_match.group(2)), int(last_match.group(3))
             tx = rect[0] + int(nx * w / 1000)
             ty = rect[1] + int(ny * h / 1000)
             log(f"Solver: {ans} → click ({tx}, {ty})")
             win32api.SetCursorPos((tx, ty))
-            time.sleep(0.05)
+            time.sleep(0.06)
             win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-            time.sleep(0.05)
+            time.sleep(0.06)
             win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
             log("Solver: Clicked.")
         else:
-            if text and text[0] in "ABCD":
-                ans = text[0]
+            # Robust fallback extraction for the letter
+            m_alt = re.findall(r"(?:ANSWER|OPTION|ОТВЕТ|ВАРИАНТ)\s*[:\-]?\s*([A-D])\b", text, re.IGNORECASE)
+            if m_alt:
+                ans = m_alt[-1].upper()
+            else:
+                m_letter = re.findall(r"\b([A-D])\b", text)
+                if m_letter:
+                    ans = m_letter[-1].upper()
             log(f"Solver: {ans} (no coords)")
 
         state.last_img_hash = curr_hash
