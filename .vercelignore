@@ -1,0 +1,10 @@
+requirements.txt
+requirements-build.txt
+omni_assistant.py
+build.py
+*.ps1
+version_info.txt
+config.json
+.git*
+.vscode
+__pycache__
