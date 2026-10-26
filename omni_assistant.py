@@ -336,17 +336,21 @@ TYPER_CPP_INSTRUCTION = (
 
 SOLVER_INSTRUCTION = (
     "You are an Elite Academic and Competitive Test Solver with 100% precision in test questions, coding, math, and logic.\n"
-    "TASK:\n"
-    "1. Thoroughly read and analyze the entire problem, question text, diagram, or code snippet.\n"
-    "2. Compare each option (A, B, C, D) carefully. Verify correctness and discard traps.\n"
-    "3. Determine the strictly correct answer.\n"
-    "4. Find the exact center coordinates [X, Y] (normalized 0-1000 relative to the image, 0,0 is top-left) of the clickable circle/checkbox or text for the correct option.\n"
-    "5. Format your output as:\n"
-    "Step: <brief 1-sentence reasoning>\n"
+    "RULES:\n"
+    "1. Read the ENTIRE question text and ALL answer options CAREFULLY before deciding.\n"
+    "2. For math/logic: compute step by step. For code: trace execution mentally.\n"
+    "3. Compare ALL options (A, B, C, D). Eliminate wrong ones by proof, NOT by intuition.\n"
+    "4. Watch out for trick questions, double negatives, and edge cases.\n"
+    "5. Once certain, find the EXACT center pixel [X, Y] of the correct option's clickable radio button/checkbox.\n"
+    "   - Coordinates are normalized 0-1000 (0,0=top-left, 1000,1000=bottom-right of the image).\n"
+    "   - X is horizontal position, Y is vertical position.\n"
+    "   - Target the CENTER of the circle/checkbox, NOT the text label.\n"
+    "6. Output format (STRICTLY follow this — no other text after ANSWER line):\n"
+    "Step: <one-sentence reasoning showing WHY this answer is correct>\n"
     "ANSWER: <LETTER> [<X>, <Y>]\n"
     "Example:\n"
-    "Step: Option B is correct because 2^10 = 1024.\n"
-    "ANSWER: B [450, 680]"
+    "Step: 2^10 = 1024, so option B is the only correct value.\n"
+    "ANSWER: B [125, 680]"
 )
 
 
@@ -1240,13 +1244,24 @@ def log_watcher_thread():
 
 
 # ─── TELEGRAM BOT POLLER ──────────────────────────────────────────────────────
+# ─── STARTUP ANNOUNCEMENT DEDUP ──────────────────────────────────────────────
+_STARTUP_SENT = False
+_STARTUP_LOCK = threading.Lock()
+
 def tg_bot_poller():
+    global _STARTUP_SENT
     last_update_id = None
     log(f"Telegram poller started on {state.pc_name}")
 
-    # Startup announcement in Telegram with small randomized delay
+    # Startup announcement — sent ONCE per process, with random delay to spread
+    # multiple-PC simultaneous boot messages
     def _send_startup():
-        time.sleep(random.uniform(0.8, 2.0))
+        global _STARTUP_SENT
+        with _STARTUP_LOCK:
+            if _STARTUP_SENT:
+                return
+            _STARTUP_SENT = True
+        time.sleep(random.uniform(0.5, 1.5))
         tg_send_message(
             f"🟢 <b>ПК ПОДКЛЮЧИЛСЯ К СЕТИ!</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -1262,9 +1277,14 @@ def tg_bot_poller():
         try:
             token  = getattr(state, "tg_bot_token", TG_BOT_TOKEN)
             url    = f"https://api.telegram.org/bot{token}/getUpdates"
-            # timeout=0 eliminates HTTP 409 Conflict across multiple PCs polling the same bot token
-            params = {"offset": -50, "timeout": 0}
-            resp = requests.get(url, params=params, timeout=10)
+            # Use long-polling with proper offset to avoid re-processing old updates
+            # timeout=0 avoids HTTP 409 Conflict when multiple PCs poll same bot
+            params = {"timeout": 0}
+            if last_update_id is not None:
+                params["offset"] = last_update_id + 1
+            else:
+                params["offset"] = -1  # get only the latest update on first call
+            resp = requests.get(url, params=params, timeout=12)
             if resp.status_code == 429:
                 try:
                     retry_after = resp.json().get("parameters", {}).get("retry_after", 4)
@@ -1285,9 +1305,8 @@ def tg_bot_poller():
 
             results = data.get("result", [])
             if last_update_id is None:
-                # При первом запуске пропускаем старые сообщения
+                # On first boot: mark all existing updates as seen, don't process them
                 last_update_id = max((u.get("update_id", 0) for u in results), default=0)
-                time.sleep(random.uniform(1.0, 2.5))
                 continue
 
             for update in results:
@@ -1337,8 +1356,10 @@ def tg_bot_poller():
                 args = clean_tokens[1:]
 
                 # Stagger responses for broadcast mass commands to prevent Telegram 429 rate limit
+                # Each PC picks a unique delay based on its name hash to avoid collisions
                 if target_pc is None and cmd in ("/list_pc", "/status", "/solver", "/python", "/typer_py", "/cpp", "/typer_cpp", "/pass", "/setpass", "/lock", "/terminate", "/autostart"):
-                    time.sleep(random.uniform(0.1, 1.5))
+                    _pc_hash = int(hashlib.md5(state.pc_name.encode()).hexdigest(), 16)
+                    time.sleep((_pc_hash % 20) * 0.15)  # 0..2.85s spread based on PC name
 
                 # ── /start /help ──────────────────────────────────
                 if cmd in ("/start", "/help"):
@@ -1613,7 +1634,7 @@ def tg_bot_poller():
                             f"• Change: <code>/change key 1 &lt;KEY&gt;</code>\n"
                             f"• Delete: <code>/del key 1|2|3</code>"
                         )
-            time.sleep(random.uniform(1.2, 2.2))
+            time.sleep(random.uniform(0.8, 1.5))
 
         except Exception:
             time.sleep(2.5)
