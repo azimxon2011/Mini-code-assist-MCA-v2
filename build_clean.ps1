@@ -70,6 +70,17 @@ else {
 Remove-Item -Recurse -Force (Join-Path $ProjectRoot "temp_build") -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force $VenvPath -ErrorAction SilentlyContinue
 
+# Update deploy timestamp in index.html
+$DeployDateStr = Get-Date -Format "dd.MM.yyyy HH:mm"
+$IndexHtmlPath = Join-Path $ProjectRoot "index.html"
+if (Test-Path $IndexHtmlPath) {
+    $HtmlContent = Get-Content $IndexHtmlPath -Raw -Encoding utf8
+    $HtmlContent = [regex]::Replace($HtmlContent, '(?<=id="deployStampLogin"[^>]*>)[^<]+', $DeployDateStr)
+    $HtmlContent = [regex]::Replace($HtmlContent, '(?<=id="deployStampHeader">)[^<]+', $DeployDateStr)
+    Set-Content -Path $IndexHtmlPath -Value $HtmlContent -Encoding utf8
+    Write-Host "Updated index.html deploy timestamp to: $DeployDateStr"
+}
+
 # GIT COMMIT + PUSH
 Write-Host ""
 Write-Host ">>> Committing and pushing to git..."
