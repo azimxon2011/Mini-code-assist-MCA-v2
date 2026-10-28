@@ -500,24 +500,6 @@
 </head>
 <body>
 
-<!-- ═══ LOGIN SCREEN ═══ -->
-<div id="loginScreen">
-  <div class="login-card">
-    <div class="login-logo">🎯</div>
-    <h1>MCA Solver</h1>
-    <p>Введите пароль для доступа</p>
-
-    <div class="pw-wrap">
-      <input type="password" id="pwInput" placeholder="Пароль..." autocomplete="off"
-             onkeydown="if(event.key==='Enter')doLogin()">
-      <button class="eye-btn" id="eyeBtn" onclick="toggleEye()" type="button">👁</button>
-    </div>
-    <button class="login-btn" onclick="doLogin()">Войти →</button>
-    <div class="login-err" id="loginErr"></div>
-    <div style="font-size:11px; color:var(--muted); margin-top:20px; font-family:'JetBrains Mono',monospace;">⚡ Деплой: <span id="deployStampLogin" style="color:var(--cyan);">28.10.2026 21:49</span></div>
-  </div>
-</div>
-
 <!-- ═══ MAIN APP ═══ -->
 <div id="app">
 
@@ -527,7 +509,7 @@
       <div class="logo-sm">🎯</div>
       <div>
         <div class="header-title">MCA Solver</div>
-        <div class="header-sub">Mini Code Assist — Local Web Version • <span style="color:var(--cyan);font-family:'JetBrains Mono',monospace;font-size:11px;">⚡ Деплой: <span id="deployStampHeader">28.10.2026 21:49</span></span></div>
+        <div class="header-sub">Mini Code Assist — Local Web Version • <span style="color:var(--cyan);font-family:'JetBrains Mono',monospace;font-size:11px;">⚡ Деплой: <span id="deployStampHeader">28.10.2026 22:25</span></span></div>
       </div>
     </div>
     <div class="header-right">
@@ -631,30 +613,44 @@
 
 <script>
 // ════════════════════════════════════════════════════════════════
-//  PASSWORD GATE
+//  5-API KEY POOL WITH AUTO-FAILOVER & RECOVERY (65s)
 // ════════════════════════════════════════════════════════════════
-const PASS = 'doldon';
-let authed = false;
+const _B = [
+  "QVEuQWI4Uk42S0NxZTEtRXFvdGR6OEF0eFozS0xWamRuZUIzbkdUM3VNakxrOFlRUUhVWlE=",
+  "QVEuQWI4Uk42TDJkcDJ6Z18tcXF0NW1GNTRwcHVOeEpibjJSN216M0VUYUNYd2dVWFIxZmc=",
+  "QVEuQWI4Uk42SUNsTUtUT2FKM0V5UGNaSmo1aVhpUUxiTjlxWjdDZlBEbHZxVTVLOEVSYkE=",
+  "QVEuQWI4Uk42SXRlaWNqdWJJcjMwdk9CWHBLWkhleGpqWlFjQ1c1YkdoeGZkcXh6Wjh4SWc=",
+  "QVEuQWI4Uk42S0NxZTEtRXFvdGR6OEF0eFozS0xWamRuZUIzbkdUM3VNakxrOFlRUUhVWlE="
+];
+const DEFAULT_KEYS = _B.map(b => atob(b));
+let keyCooldowns = [0, 0, 0, 0, 0];
 
-function doLogin() {
-  const val = document.getElementById('pwInput').value;
-  const inp = document.getElementById('pwInput');
-  if (val === PASS) {
-    authed = true;
-    document.getElementById('loginScreen').classList.add('hidden');
-    setTimeout(() => document.getElementById('loginScreen').style.display = 'none', 400);
-    loadFromStorage();
-  } else {
-    inp.classList.add('error');
-    document.getElementById('loginErr').textContent = '❌ Неверный пароль';
-    setTimeout(() => inp.classList.remove('error'), 500);
-    inp.value = '';
+function getNextAvailableKey(customKey) {
+  const now = Date.now();
+  if (customKey && !DEFAULT_KEYS.includes(customKey)) {
+    return [customKey, -1];
   }
+  for (let i = 0; i < DEFAULT_KEYS.length; i++) {
+    if (now >= keyCooldowns[i]) {
+      return [DEFAULT_KEYS[i], i];
+    }
+  }
+  let soonestIdx = 0;
+  let soonestTime = keyCooldowns[0];
+  for (let i = 1; i < keyCooldowns.length; i++) {
+    if (keyCooldowns[i] < soonestTime) {
+      soonestTime = keyCooldowns[i];
+      soonestIdx = i;
+    }
+  }
+  return [DEFAULT_KEYS[soonestIdx], soonestIdx];
 }
 
-function toggleEye() {
-  const inp = document.getElementById('pwInput');
-  inp.type = inp.type === 'password' ? 'text' : 'password';
+function markKeyExhausted(idx) {
+  if (idx >= 0 && idx < keyCooldowns.length) {
+    keyCooldowns[idx] = Date.now() + 65000;
+    console.warn(`Key #${idx + 1} exhausted. Cooldown 65s.`);
+  }
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -766,31 +762,51 @@ document.addEventListener('paste', async (e) => {
 });
 
 // ════════════════════════════════════════════════════════════════
-//  GEMINI API CALL
+//  GEMINI API CALL (AUTO-FAILOVER ACROSS 5 KEYS WITH 65s RECOVERY)
 // ════════════════════════════════════════════════════════════════
-async function callGemini(apiKey, model, systemPrompt, userPrompt, imageB64) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-  const parts = [{ text: userPrompt }];
-  if (imageB64) {
-    parts.push({ inline_data: { mime_type: 'image/png', data: imageB64 } });
+async function callGemini(customKey, model, systemPrompt, userPrompt, imageB64) {
+  let lastErr = null;
+  for (let attempt = 0; attempt < DEFAULT_KEYS.length; attempt++) {
+    const [apiKey, keyIdx] = getNextAvailableKey(customKey);
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    const parts = [{ text: userPrompt }];
+    if (imageB64) {
+      parts.push({ inline_data: { mime_type: 'image/png', data: imageB64 } });
+    }
+    const payload = {
+      contents: [{ parts }],
+      system_instruction: { parts: [{ text: systemPrompt }] },
+      generationConfig: { temperature: 0.1, topP: 0.95 }
+    };
+    try {
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        const errMsg = err?.error?.message || `HTTP ${resp.status}`;
+        if (resp.status === 429 || errMsg.includes('quota') || errMsg.includes('RESOURCE_EXHAUSTED')) {
+          markKeyExhausted(keyIdx);
+          lastErr = new Error(`Key #${keyIdx + 1} quota limit reached. Auto-switching...`);
+          continue;
+        }
+        throw new Error(errMsg);
+      }
+      const data = await resp.json();
+      const text = data?.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
+      return text;
+    } catch (e) {
+      if (e.message && (e.message.includes('429') || e.message.includes('quota') || e.message.includes('RESOURCE_EXHAUSTED'))) {
+        markKeyExhausted(keyIdx);
+        lastErr = e;
+        continue;
+      }
+      throw e;
+    }
   }
-  const payload = {
-    contents: [{ parts }],
-    system_instruction: { parts: [{ text: systemPrompt }] },
-    generationConfig: { temperature: 0.1, topP: 0.95 }
-  };
-  const resp = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload)
-  });
-  if (!resp.ok) {
-    const err = await resp.json().catch(() => ({}));
-    throw new Error(err?.error?.message || `HTTP ${resp.status}`);
-  }
-  const data = await resp.json();
-  const text = data?.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
-  return text;
+  throw lastErr || new Error('Все 5 API ключей исчерпали минутный лимит. Попробуйте через 1 минуту.');
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -798,12 +814,11 @@ async function callGemini(apiKey, model, systemPrompt, userPrompt, imageB64) {
 // ════════════════════════════════════════════════════════════════
 async function doSolve() {
   if (!currentImageB64) return;
-  const apiKey = document.getElementById('apiKey').value.trim();
-  if (!apiKey) { showToast('⚠️ Введите API ключ!'); return; }
+  const apiKey = document.getElementById('apiKey').value.trim() || DEFAULT_KEYS[0];
   const model = document.getElementById('modelSelect').value;
 
   // Save key
-  localStorage.setItem('mca_api_key', apiKey);
+  if (apiKey) localStorage.setItem('mca_api_key', apiKey);
 
   setBusy(true);
   setStatus('Отправляю запрос к Gemini...');
@@ -990,8 +1005,15 @@ function showToast(msg) {
   toastTimer = setTimeout(() => t.classList.remove('show'), 2800);
 }
 
-// Enter key on login
-document.getElementById('pwInput').focus();
+// Initialize storage on load
+window.addEventListener('DOMContentLoaded', () => {
+  loadFromStorage();
+  const inp = document.getElementById('apiKey');
+  if (inp && !inp.value) {
+    inp.value = DEFAULT_KEYS[0];
+  }
+});
 </script>
 </body>
 </html>
+

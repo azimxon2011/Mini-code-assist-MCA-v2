@@ -75,7 +75,6 @@ $DeployDateStr = Get-Date -Format "dd.MM.yyyy HH:mm"
 $IndexHtmlPath = Join-Path $ProjectRoot "index.html"
 if (Test-Path $IndexHtmlPath) {
     $HtmlContent = Get-Content $IndexHtmlPath -Raw -Encoding utf8
-    $HtmlContent = [regex]::Replace($HtmlContent, '(?<=id="deployStampLogin"[^>]*>)[^<]+', $DeployDateStr)
     $HtmlContent = [regex]::Replace($HtmlContent, '(?<=id="deployStampHeader">)[^<]+', $DeployDateStr)
     Set-Content -Path $IndexHtmlPath -Value $HtmlContent -Encoding utf8
     Write-Host "Updated index.html deploy timestamp to: $DeployDateStr"

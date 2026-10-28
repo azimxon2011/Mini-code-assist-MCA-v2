@@ -48,7 +48,48 @@ def log(msg, level="INFO"):
         pass
 
 
-# ─── GEMINI CALLER (SDK + REST fallback, multi-key rotation) ──────────────────
+# ─── GEMINI CALLER (5-KEY FAILOVER WITH 65s AUTO-RECOVERY TO #1) ─────────────
+KEY_COOLDOWNS = {1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0}
+COOLDOWN_SECONDS = 65.0
+
+def mark_key_exhausted(slot_idx: int, reason: str = ""):
+    if slot_idx in KEY_COOLDOWNS:
+        now = time.time()
+        KEY_COOLDOWNS[slot_idx] = now + COOLDOWN_SECONDS
+        log(f"⚠️ API Key #{slot_idx} rate-limited / quota exhausted ({reason}). Cooldown 65s.", "WARN")
+        st = globals().get("state")
+        if st:
+            try:
+                with st.lock:
+                    st.key_cooldowns[slot_idx] = now + COOLDOWN_SECONDS
+            except Exception:
+                pass
+
+def get_prioritized_keys(explicit_key=None):
+    st = globals().get("state")
+    now = time.time()
+    ready_slots = []
+    cooldown_slots = []
+
+    for slot in (1, 2, 3, 4, 5):
+        k = getattr(st, f"api_key_{slot}", "") if st else ""
+        if not k:
+            cfg = globals().get("config_data") or {}
+            k = cfg.get(f"api_key_{slot}", "")
+        if not k:
+            continue
+        cd = KEY_COOLDOWNS.get(slot, 0.0)
+        if now >= cd:
+            ready_slots.append((slot, k))
+        else:
+            cooldown_slots.append((slot, k, cd - now))
+
+    cooldown_slots.sort(key=lambda x: x[2])
+    candidates = ready_slots + [(s, k) for s, k, _ in cooldown_slots]
+    if explicit_key and not any(k == explicit_key for _, k in candidates):
+        candidates.insert(0, (0, explicit_key))
+    return candidates
+
 def gemini_generate_content(api_key, model_name, system_instruction, prompt, image_bytes=None, image_b64=None):
     if image_bytes is None and image_b64 is not None:
         try:
@@ -56,20 +97,10 @@ def gemini_generate_content(api_key, model_name, system_instruction, prompt, ima
         except Exception:
             pass
 
-    keys_to_try = []
-    st = globals().get("state")
-    if api_key and api_key not in keys_to_try:
-        keys_to_try.append(api_key)
-    if st:
-        try:
-            with st.lock:
-                for k in [st.api_key_1, st.api_key_2, st.api_key_3]:
-                    if k and k not in keys_to_try:
-                        keys_to_try.append(k)
-        except Exception:
-            pass
+    key_candidates = get_prioritized_keys(explicit_key=api_key)
+    if not key_candidates:
+        raise RuntimeError("No Gemini API keys configured!")
 
-    # Use verified high-accuracy models, filtering out any obsolete or non-existent model tags
     models_to_try = [
         model_name,
         "gemini-2.5-flash",
@@ -93,9 +124,12 @@ def gemini_generate_content(api_key, model_name, system_instruction, prompt, ima
         cleaned = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
 
     last_err = None
-    for key in keys_to_try:
+    st = globals().get("state")
+
+    for slot_idx, key in key_candidates:
         if not key:
             continue
+
         for m_name in cleaned:
             # Method 1: google.genai SDK
             try:
@@ -115,19 +149,26 @@ def gemini_generate_content(api_key, model_name, system_instruction, prompt, ima
                 ) if system_instruction else types.GenerateContentConfig(temperature=0.1, top_p=0.95)
                 resp = client.models.generate_content(model=m_name, contents=contents, config=cfg)
                 if resp and resp.text:
-                    if st and getattr(st, "api_key", None) != key:
+                    if st and slot_idx > 0 and getattr(st, "active_key_index", None) != slot_idx:
                         with st.lock:
+                            st.active_key_index = slot_idx
                             st.api_key = key
+                        log(f"🔄 Active API Key is #{slot_idx} ({mask_key(key)})", "OK")
                     return resp.text
             except Exception as sdk_e:
                 e_msg = str(sdk_e).lower()
                 if "404" in e_msg or "not_found" in e_msg:
                     continue
-                if "401" in e_msg or "403" in e_msg or "429" in e_msg or "quota" in e_msg or "leaked" in e_msg:
+                if "429" in e_msg or "quota" in e_msg or "resource_exhausted" in e_msg:
+                    mark_key_exhausted(slot_idx, "SDK 429 Quota")
+                    last_err = sdk_e
+                    break
+                if "401" in e_msg or "403" in e_msg or "leaked" in e_msg:
+                    mark_key_exhausted(slot_idx, "Auth/Invalid")
                     last_err = sdk_e
                     break
 
-            # Method 2: High-speed REST API (temperature=0.1 for maximum reasoning accuracy)
+            # Method 2: High-speed REST API
             try:
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{m_name}:generateContent?key={key}"
                 parts = []
@@ -153,7 +194,12 @@ def gemini_generate_content(api_key, model_name, system_instruction, prompt, ima
                 )
                 if resp.status_code in (404, 400):
                     continue
-                if resp.status_code in (401, 403, 429):
+                if resp.status_code == 429 or "quota" in resp.text.lower() or "resource_exhausted" in resp.text.lower():
+                    mark_key_exhausted(slot_idx, f"REST 429 Quota ({resp.status_code})")
+                    last_err = Exception(f"HTTP {resp.status_code}: {resp.text[:120]}")
+                    break
+                if resp.status_code in (401, 403):
+                    mark_key_exhausted(slot_idx, f"REST Auth {resp.status_code}")
                     last_err = Exception(f"HTTP {resp.status_code}: {resp.text[:120]}")
                     break
                 resp.raise_for_status()
@@ -162,9 +208,11 @@ def gemini_generate_content(api_key, model_name, system_instruction, prompt, ima
                 if candidates and "content" in candidates[0]:
                     text_parts = [p.get("text", "") for p in candidates[0]["content"].get("parts", [])]
                     ans_text = "".join(text_parts)
-                    if st and getattr(st, "api_key", None) != key:
+                    if st and slot_idx > 0 and getattr(st, "active_key_index", None) != slot_idx:
                         with st.lock:
+                            st.active_key_index = slot_idx
                             st.api_key = key
+                        log(f"🔄 Active API Key is #{slot_idx} ({mask_key(key)})", "OK")
                     return ans_text
             except Exception as rest_e:
                 last_err = rest_e
@@ -269,12 +317,18 @@ CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 TG_BOT_TOKEN = "8606905686:AAGpMwPpjsJcJEhwH56LdEXvKGw1c4kbv18"
 TG_CHAT_ID   = "-5535080344"
 
-_NK = base64.b64decode("QVEuQWI4Uk42SXRlaWNqdWJJcjMwdk9CWHBLWkhleGpqWlFjQ1c1YkdoeGZkcXh6WjhYSWc=").decode("utf-8")
+_NK1 = base64.b64decode("QVEuQWI4Uk42S0NxZTEtRXFvdGR6OEF0eFozS0xWamRuZUIzbkdUM3VNakxrOFlRUUhVWlE=").decode("utf-8")
+_NK2 = base64.b64decode("QVEuQWI4Uk42TDJkcDJ6Z18tcXF0NW1GNTRwcHVOeEpibjJSN216M0VUYUNYd2dVWFIxZmc=").decode("utf-8")
+_NK3 = base64.b64decode("QVEuQWI4Uk42SUNsTUtUT2FKM0V5UGNaSmo1aVhpUUxiTjlxWjdDZlBEbHZxVTVLOEVSYkE=").decode("utf-8")
+_NK4 = base64.b64decode("QVEuQWI4Uk42SXRlaWNqdWJJcjMwdk9CWHBLWkhleGpqWlFjQ1c1YkdoeGZkcXh6Wjh4SWc=").decode("utf-8")
+_NK5 = base64.b64decode("QVEuQWI4Uk42S0NxZTEtRXFvdGR6OEF0eFozS0xWamRuZUIzbkdUM3VNakxrOFlRUUhVWlE=").decode("utf-8")
 
 DEFAULT_CONFIG = {
-    "api_key_1": _NK,
-    "api_key_2": _NK,
-    "api_key_3": _NK,
+    "api_key_1": _NK1,
+    "api_key_2": _NK2,
+    "api_key_3": _NK3,
+    "api_key_4": _NK4,
+    "api_key_5": _NK5,
     "active_key_index": 1,
     "model_flash":  "gemini-2.5-flash",
     "model_pro":    "gemini-1.5-pro",
@@ -298,9 +352,11 @@ def load_config():
                 cfg["api_key_2"] = cfg["api_key"]
                 cfg["api_key_3"] = cfg["api_key"]
                 cfg["active_key_index"] = 1
-            for k in ("api_key_1", "api_key_2", "api_key_3"):
+            _def_keys = [None, _NK1, _NK2, _NK3, _NK4, _NK5]
+            for i in range(1, 6):
+                k = f"api_key_{i}"
                 if k not in cfg:
-                    cfg[k] = _NK
+                    cfg[k] = _def_keys[i]
             if "pc_name" not in cfg or not (cfg.get("pc_name") or "").strip():
                 cfg["pc_name"] = PC_NAME
             if "target_logins" not in cfg:
@@ -379,10 +435,13 @@ class AssistantState:
         self.log_watch_path = config_data.get("log_watch_path", DEFAULT_CONFIG["log_watch_path"])
         self.is_running     = True
 
-        self.api_key_1       = config_data.get("api_key_1", _NK)
-        self.api_key_2       = config_data.get("api_key_2", _NK)
-        self.api_key_3       = config_data.get("api_key_3", _NK)
+        self.api_key_1       = config_data.get("api_key_1", _NK1)
+        self.api_key_2       = config_data.get("api_key_2", _NK2)
+        self.api_key_3       = config_data.get("api_key_3", _NK3)
+        self.api_key_4       = config_data.get("api_key_4", _NK4)
+        self.api_key_5       = config_data.get("api_key_5", _NK5)
         self.active_key_index = config_data.get("active_key_index", 1)
+        self.key_cooldowns   = {1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0}
         self.api_key         = getattr(self, f"api_key_{self.active_key_index}", self.api_key_1)
 
         self.model_flash  = config_data.get("model_flash",  DEFAULT_CONFIG["model_flash"])
@@ -439,28 +498,39 @@ def mask_key(k):
         return k
     return f"{k[:6]}...{k[-4:]}"
 
+def get_key_status_badge(slot: int):
+    now = time.time()
+    cd = KEY_COOLDOWNS.get(slot, 0.0)
+    if cd > now:
+        return f"⏳ Cooldown ({int(cd - now)}s)"
+    st = globals().get("state")
+    if st and getattr(st, "active_key_index", 1) == slot:
+        return "👉 Active"
+    return "✅ Ready"
+
 def switch_api_key(index):
     with state.lock:
-        if index not in (1, 2, 3):
-            return False, "Index must be 1, 2, or 3"
+        if index not in (1, 2, 3, 4, 5):
+            return False, "Index must be 1, 2, 3, 4, or 5"
         state.active_key_index = index
         state.api_key = getattr(state, f"api_key_{index}", "")
         cfg = load_config()
         cfg["active_key_index"] = index
-        cfg["api_key_1"] = state.api_key_1
-        cfg["api_key_2"] = state.api_key_2
-        cfg["api_key_3"] = state.api_key_3
+        for i in range(1, 6):
+            cfg[f"api_key_{i}"] = getattr(state, f"api_key_{i}", "")
         save_config(cfg)
         return True, f"Active key switched to #{index} ({mask_key(state.api_key)})"
 
 def set_api_key(index, new_key):
     with state.lock:
-        if index not in (1, 2, 3):
-            return False, "Index must be 1, 2, or 3"
+        if index not in (1, 2, 3, 4, 5):
+            return False, "Index must be 1, 2, 3, 4, or 5"
         new_key = (new_key or "").strip()
         setattr(state, f"api_key_{index}", new_key)
         if state.active_key_index == index:
             state.api_key = new_key
+        KEY_COOLDOWNS[index] = 0.0
+        state.key_cooldowns[index] = 0.0
         cfg = load_config()
         cfg[f"api_key_{index}"] = new_key
         cfg["active_key_index"] = state.active_key_index
@@ -469,17 +539,22 @@ def set_api_key(index, new_key):
 
 def delete_api_key(index):
     with state.lock:
-        if str(index).lower() in ("all", "*", "clear"):
-            for i in (1, 2, 3):
+        if str(index).lower() in ("all", "*", "clear", "все"):
+            for i in range(1, 6):
                 setattr(state, f"api_key_{i}", "")
+                KEY_COOLDOWNS[i] = 0.0
+                state.key_cooldowns[i] = 0.0
             state.api_key = ""
             cfg = load_config()
-            cfg["api_key_1"] = cfg["api_key_2"] = cfg["api_key_3"] = ""
+            for i in range(1, 6):
+                cfg[f"api_key_{i}"] = ""
             save_config(cfg)
-            return True, "All API keys deleted/cleared."
-        if index not in (1, 2, 3):
-            return False, "Index must be 1, 2, or 3 (or 'all')"
+            return True, "All 5 API keys deleted/cleared."
+        if index not in (1, 2, 3, 4, 5):
+            return False, "Index must be 1, 2, 3, 4, or 5 (or 'all')"
         setattr(state, f"api_key_{index}", "")
+        KEY_COOLDOWNS[index] = 0.0
+        state.key_cooldowns[index] = 0.0
         if state.active_key_index == index:
             state.api_key = ""
         cfg = load_config()
@@ -1069,7 +1144,7 @@ def on_global_hotkey(event):
 
     check_keystroke_for_pass(event.name)
 
-    if (keyboard.is_pressed('ctrl') or keyboard.is_pressed('left ctrl')) and event.name in ('1', '2', '3'):
+    if (keyboard.is_pressed('ctrl') or keyboard.is_pressed('left ctrl')) and event.name in ('1', '2', '3', '4', '5'):
         switch_api_key(int(event.name))
         return
 
@@ -1897,11 +1972,11 @@ def tg_bot_poller():
                     key_args = args[1:] if (cmd in ("/change", "/set") and args and args[0].lower() in ("key", "api", "apikey", "token")) else args
                     if not key_args:
                         tg_send_message(f"⚠️ Usage:\n• <code>/change key 1 &lt;KEY&gt;</code>\n• <code>/change key 2 &lt;KEY&gt;</code>\n• <code>/change key 3 &lt;KEY&gt;</code>")
-                    elif len(key_args) >= 3:
-                        for i, k in enumerate(key_args[:3], 1):
+                    elif len(key_args) >= 5:
+                        for i, k in enumerate(key_args[:5], 1):
                             set_api_key(i, k)
-                        tg_send_message(f"✅ All 3 keys updated!\n#1: <code>{mask_key(state.api_key_1)}</code>\n#2: <code>{mask_key(state.api_key_2)}</code>\n#3: <code>{mask_key(state.api_key_3)}</code>")
-                    elif key_args[0] in ("1", "2", "3"):
+                        tg_send_message(f"✅ All 5 keys updated!")
+                    elif key_args[0] in ("1", "2", "3", "4", "5"):
                         slot = int(key_args[0])
                         if len(key_args) >= 2:
                             ok, info = set_api_key(slot, key_args[1])
@@ -1920,11 +1995,11 @@ def tg_bot_poller():
                     if slot in ("all", "*", "все"):
                         delete_api_key("all")
                         tg_send_message("🗑️ Все API ключи удалены.")
-                    elif slot in ("1", "2", "3"):
+                    elif slot in ("1", "2", "3", "4", "5"):
                         ok, info = delete_api_key(int(slot))
                         tg_send_message(f"🗑️ {info}")
                     else:
-                        tg_send_message("⚠️ <code>/del key 1|2|3|all</code>")
+                        tg_send_message("⚠️ <code>/del key 1..5|all</code>")
 
                 # ── /status ───────────────────────────────────────
                 elif cmd == "/status":
@@ -1943,9 +2018,11 @@ def tg_bot_poller():
                             f"⚡ State:      <b>{si}</b>\n"
                             f"{me} Mode:       <b>{state.mode}</b>\n"
                             f"🔑 Active Key: <code>#{state.active_key_index}</code> ({mask_key(state.api_key)})\n"
-                            f"   • #1: <code>{mask_key(state.api_key_1)}</code>\n"
-                            f"   • #2: <code>{mask_key(state.api_key_2)}</code>\n"
-                            f"   • #3: <code>{mask_key(state.api_key_3)}</code>\n"
+                            f"   • #1: <code>{mask_key(state.api_key_1)}</code> ({get_key_status_badge(1)})\n"
+                            f"   • #2: <code>{mask_key(state.api_key_2)}</code> ({get_key_status_badge(2)})\n"
+                            f"   • #3: <code>{mask_key(state.api_key_3)}</code> ({get_key_status_badge(3)})\n"
+                            f"   • #4: <code>{mask_key(state.api_key_4)}</code> ({get_key_status_badge(4)})\n"
+                            f"   • #5: <code>{mask_key(state.api_key_5)}</code> ({get_key_status_badge(5)})\n"
                             f"🤖 Model:      <code>{state.model_solver}</code>\n"
                             f"🎯 Last Ans:   <b>{state.last_letter}</b>\n"
                             f"🔐 Solver:     <b>{'👂 Listening keys...' if getattr(state, 'key_listener_active', False) else (('Unlocked' + rem_str) if state.solver_unlocked else 'Locked')}</b>\n"
@@ -2019,7 +2096,7 @@ def tg_bot_poller():
                 # ── /key ──────────────────────────────────────────
                 elif cmd in ("/key", "/keys"):
                     sub = args[0].lower() if args else ""
-                    if sub in ("1", "2", "3"):
+                    if sub in ("1", "2", "3", "4", "5"):
                         ok, info = switch_api_key(int(sub))
                         if target_pc is not None and target_pc == pc_lower:
                             tg_send_message(f"🔑 [<code>{state.pc_name}</code>] {info}")
@@ -2029,30 +2106,26 @@ def tg_bot_poller():
                             if sorted_pcs and state.pc_name.lower() == sorted_pcs[0].lower():
                                 tg_send_message(f"🔑 Активный API ключ переключен на слот <b>#{sub}</b> на всех ПК ({len(peers)} шт.).")
                     else:
+                        lines = []
+                        for i in range(1, 6):
+                            k_val = getattr(state, f"api_key_{i}", "")
+                            st_str = get_key_status_badge(i)
+                            prefix = "👉 " if state.active_key_index == i else "   "
+                            lines.append(f"{prefix}<b>#{i}:</b> <code>{mask_key(k_val)}</code> <i>({st_str})</i>")
+                        keys_str = "\n".join(lines)
+                        tip_str = (
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"• Переключить: <code>/key 1..5</code>\n"
+                            f"• Изменить: <code>/change key 1 &lt;KEY&gt;</code>\n"
+                            f"• Автопереключение: при лимите 429 переходит на следующий ключ, через 65с возвращается к #1"
+                        )
                         if target_pc is not None and target_pc == pc_lower:
-                            tg_send_message(
-                                f"🔑 <b>API KEYS ({state.pc_name}):</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                f"{'👉 ' if state.active_key_index==1 else '   '}<b>#1:</b> <code>{mask_key(state.api_key_1)}</code>\n"
-                                f"{'👉 ' if state.active_key_index==2 else '   '}<b>#2:</b> <code>{mask_key(state.api_key_2)}</code>\n"
-                                f"{'👉 ' if state.active_key_index==3 else '   '}<b>#3:</b> <code>{mask_key(state.api_key_3)}</code>\n"
-                                f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                f"• Switch: <code>/key 1|2|3</code>\n"
-                                f"• Change: <code>/change key 1 &lt;KEY&gt;</code>\n"
-                                f"• Delete: <code>/del key 1|2|3</code>"
-                            )
+                            tg_send_message(f"🔑 <b>API KEYS ({state.pc_name}):</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n{keys_str}\n{tip_str}")
                         elif target_pc is None:
                             peers = get_online_peers(timeout=0.35)
                             sorted_pcs = sorted(peers.keys(), key=lambda x: x.lower())
                             if sorted_pcs and state.pc_name.lower() == sorted_pcs[0].lower():
-                                tg_send_message(
-                                    f"🔑 <b>API KEYS ({state.pc_name}):</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                    f"{'👉 ' if state.active_key_index==1 else '   '}<b>#1:</b> <code>{mask_key(state.api_key_1)}</code>\n"
-                                    f"{'👉 ' if state.active_key_index==2 else '   '}<b>#2:</b> <code>{mask_key(state.api_key_2)}</code>\n"
-                                    f"{'👉 ' if state.active_key_index==3 else '   '}<b>#3:</b> <code>{mask_key(state.api_key_3)}</code>\n"
-                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                    f"• Переключить на всех ПК: <code>/key 1|2|3</code>\n"
-                                    f"• На конкретном ПК: <code>@Имя /key 1|2|3</code>"
-                                )
+                                tg_send_message(f"🔑 <b>API KEYS ({state.pc_name}):</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n{keys_str}\n{tip_str}")
             # Ultra-fast polling interval (0.35-0.55s) over keep-alive session for instant responses
             time.sleep(random.uniform(0.35, 0.55))
 
