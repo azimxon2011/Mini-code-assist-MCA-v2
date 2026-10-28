@@ -1,0 +1,1019 @@
+﻿<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MCA Solver</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg:        #070b14;
+      --bg2:       #0d1525;
+      --surface:   rgba(255,255,255,0.04);
+      --border:    rgba(255,255,255,0.08);
+      --border-hi: rgba(99,179,237,0.35);
+      --blue:      #3b82f6;
+      --blue-dim:  rgba(59,130,246,0.15);
+      --cyan:      #22d3ee;
+      --green:     #4ade80;
+      --red:       #f87171;
+      --yellow:    #fbbf24;
+      --text:      #e2e8f0;
+      --muted:     #64748b;
+      --radius:    16px;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* ── BACKGROUND MESH ── */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background:
+        radial-gradient(ellipse 80% 50% at 20% -10%, rgba(59,130,246,0.12) 0%, transparent 60%),
+        radial-gradient(ellipse 60% 40% at 80% 110%, rgba(34,211,238,0.08) 0%, transparent 60%);
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* ── LOGIN SCREEN ── */
+    #loginScreen {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      backdrop-filter: blur(4px);
+      background: rgba(7,11,20,0.85);
+      transition: opacity 0.4s ease;
+    }
+    #loginScreen.hidden { opacity: 0; pointer-events: none; }
+
+    .login-card {
+      position: relative;
+      background: rgba(13,21,37,0.9);
+      border: 1px solid var(--border);
+      border-radius: 24px;
+      padding: 48px 40px;
+      width: 380px;
+      text-align: center;
+      box-shadow:
+        0 0 0 1px rgba(59,130,246,0.1),
+        0 40px 80px -20px rgba(0,0,0,0.8),
+        inset 0 1px 0 rgba(255,255,255,0.06);
+      animation: slideUp 0.5s cubic-bezier(0.16,1,0.3,1);
+    }
+
+    @keyframes slideUp {
+      from { opacity:0; transform:translateY(24px); }
+      to   { opacity:1; transform:translateY(0); }
+    }
+
+    .login-logo {
+      width: 64px; height: 64px;
+      margin: 0 auto 24px;
+      background: linear-gradient(135deg, #1d4ed8, #0e7490);
+      border-radius: 18px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 28px;
+      box-shadow: 0 0 30px rgba(59,130,246,0.3);
+    }
+
+    .login-card h1 {
+      font-size: 22px; font-weight: 700;
+      letter-spacing: -0.03em;
+      margin-bottom: 6px;
+    }
+    .login-card p {
+      font-size: 13px; color: var(--muted);
+      margin-bottom: 28px;
+    }
+
+    .pw-wrap {
+      position: relative;
+      margin-bottom: 16px;
+    }
+    .pw-wrap input {
+      width: 100%;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 13px 44px 13px 16px;
+      font-size: 15px;
+      font-family: 'JetBrains Mono', monospace;
+      color: var(--text);
+      letter-spacing: 0.1em;
+      outline: none;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    .pw-wrap input:focus {
+      border-color: var(--border-hi);
+      box-shadow: 0 0 0 3px rgba(59,130,246,0.12);
+    }
+    .pw-wrap input.error {
+      border-color: rgba(248,113,113,0.5);
+      animation: shake 0.35s ease;
+    }
+    @keyframes shake {
+      0%,100%{transform:translateX(0)} 25%{transform:translateX(-6px)} 75%{transform:translateX(6px)}
+    }
+    .eye-btn {
+      position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+      background: none; border: none; cursor: pointer;
+      color: var(--muted); font-size: 16px; padding: 4px;
+      transition: color 0.2s;
+    }
+    .eye-btn:hover { color: var(--text); }
+
+    .login-btn {
+      width: 100%;
+      padding: 13px;
+      background: linear-gradient(135deg, #2563eb, #0e7490);
+      border: none; border-radius: 12px;
+      color: #fff; font-size: 15px; font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      box-shadow: 0 6px 20px rgba(37,99,235,0.35);
+    }
+    .login-btn:hover { transform: translateY(-1px); box-shadow: 0 10px 28px rgba(37,99,235,0.45); }
+    .login-btn:active { transform: translateY(0); }
+
+    .login-err {
+      margin-top: 12px;
+      font-size: 13px; color: var(--red);
+      min-height: 18px;
+    }
+
+    /* ── MAIN APP ── */
+    #app {
+      position: relative; z-index: 1;
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 32px 20px 60px;
+    }
+
+    /* Header */
+    .header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 32px;
+    }
+    .header-left { display: flex; align-items: center; gap: 14px; }
+    .logo-sm {
+      width: 42px; height: 42px;
+      background: linear-gradient(135deg, #1d4ed8, #0e7490);
+      border-radius: 12px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 18px;
+      box-shadow: 0 0 20px rgba(59,130,246,0.25);
+      flex-shrink: 0;
+    }
+    .header-title { font-size: 20px; font-weight: 700; letter-spacing: -0.03em; }
+    .header-sub { font-size: 12px; color: var(--muted); }
+
+    .header-right { display: flex; align-items: center; gap: 10px; }
+
+    /* Mode tabs */
+    .mode-tabs {
+      display: flex; gap: 6px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 4px;
+    }
+    .mode-tab {
+      padding: 7px 16px;
+      border-radius: 8px;
+      font-size: 13px; font-weight: 500;
+      border: none; cursor: pointer;
+      background: transparent; color: var(--muted);
+      transition: all 0.2s;
+    }
+    .mode-tab.active {
+      background: linear-gradient(135deg, #1d4ed8, #0e7490);
+      color: #fff;
+      box-shadow: 0 2px 10px rgba(37,99,235,0.3);
+    }
+    .mode-tab:hover:not(.active) { color: var(--text); background: var(--surface); }
+
+    /* Cards */
+    .card {
+      background: rgba(13,21,37,0.7);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      backdrop-filter: blur(12px);
+      overflow: hidden;
+    }
+    .card-header {
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 10px;
+      font-size: 13px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
+      color: var(--muted);
+    }
+    .card-header .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--blue);
+      box-shadow: 0 0 8px var(--blue);
+    }
+
+    /* Upload zone */
+    .upload-zone {
+      margin: 20px;
+      border: 2px dashed var(--border);
+      border-radius: 14px;
+      padding: 36px 20px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.2s;
+      position: relative;
+    }
+    .upload-zone:hover, .upload-zone.drag-over {
+      border-color: var(--border-hi);
+      background: var(--blue-dim);
+    }
+    .upload-zone input[type="file"] {
+      position: absolute; inset: 0; opacity: 0; cursor: pointer;
+    }
+    .upload-icon { font-size: 36px; margin-bottom: 10px; }
+    .upload-title { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+    .upload-sub { font-size: 12px; color: var(--muted); }
+
+    /* Preview */
+    #previewBox {
+      margin: 0 20px 20px;
+      border-radius: 12px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      position: relative;
+      display: none;
+    }
+    #previewImg {
+      width: 100%; display: block;
+      max-height: 400px; object-fit: contain;
+      background: #050810;
+    }
+    .preview-clear {
+      position: absolute; top: 10px; right: 10px;
+      background: rgba(0,0,0,0.7);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text); font-size: 12px; font-weight: 600;
+      padding: 5px 12px; cursor: pointer;
+      transition: all 0.2s;
+    }
+    .preview-clear:hover { background: rgba(248,113,113,0.2); border-color: rgba(248,113,113,0.4); }
+
+    /* Settings row */
+    .settings-row {
+      padding: 16px 20px;
+      border-top: 1px solid var(--border);
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    }
+    .settings-row label { font-size: 12px; color: var(--muted); }
+    .settings-row input, .settings-row select {
+      background: rgba(255,255,255,0.05);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 7px 12px;
+      font-size: 13px;
+      color: var(--text);
+      font-family: 'JetBrains Mono', monospace;
+      outline: none;
+      transition: border-color 0.2s;
+      flex: 1; min-width: 160px;
+    }
+    .settings-row input:focus, .settings-row select:focus {
+      border-color: var(--border-hi);
+    }
+    .settings-row select option { background: #0d1525; }
+
+    /* Action button */
+    .action-bar {
+      padding: 0 20px 20px;
+    }
+    .solve-btn {
+      width: 100%;
+      padding: 15px;
+      background: linear-gradient(135deg, #1d4ed8 0%, #0e7490 100%);
+      border: none; border-radius: 12px;
+      color: #fff; font-size: 15px; font-weight: 700;
+      cursor: pointer; letter-spacing: 0.02em;
+      transition: all 0.2s;
+      box-shadow: 0 6px 24px rgba(37,99,235,0.35);
+      display: flex; align-items: center; justify-content: center; gap: 10px;
+    }
+    .solve-btn:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 10px 32px rgba(37,99,235,0.45); }
+    .solve-btn:active:not(:disabled) { transform: translateY(0); }
+    .solve-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* Spinner */
+    .spinner {
+      width: 18px; height: 18px;
+      border: 2px solid rgba(255,255,255,0.3);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      display: none;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Result card */
+    .result-card {
+      margin-top: 20px;
+    }
+
+    .answer-big {
+      display: flex; align-items: center; justify-content: center;
+      gap: 20px;
+      padding: 32px 20px;
+    }
+    .answer-letter {
+      width: 80px; height: 80px;
+      background: linear-gradient(135deg, #1d4ed8, #0e7490);
+      border-radius: 20px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 38px; font-weight: 800;
+      font-family: 'JetBrains Mono', monospace;
+      box-shadow: 0 0 40px rgba(37,99,235,0.4);
+      animation: pop 0.4s cubic-bezier(0.16,1,0.3,1);
+      flex-shrink: 0;
+    }
+    @keyframes pop {
+      from { transform: scale(0.5); opacity: 0; }
+      to   { transform: scale(1); opacity: 1; }
+    }
+    .answer-meta { flex: 1; }
+    .answer-meta .answer-label {
+      font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+      color: var(--muted); margin-bottom: 4px;
+    }
+    .answer-meta .answer-text {
+      font-size: 18px; font-weight: 700; color: var(--green);
+      margin-bottom: 8px;
+    }
+    .answer-meta .answer-step {
+      font-size: 13px; color: var(--muted); line-height: 1.5;
+    }
+
+    /* No-answer state */
+    .no-answer {
+      padding: 32px 20px;
+      text-align: center;
+      color: var(--red);
+      font-size: 14px;
+    }
+
+    /* Raw reasoning */
+    .raw-section {
+      padding: 16px 20px;
+      border-top: 1px solid var(--border);
+    }
+    .raw-toggle {
+      font-size: 12px; color: var(--muted); cursor: pointer;
+      display: flex; align-items: center; gap: 6px;
+      background: none; border: none; color: var(--muted);
+      transition: color 0.2s;
+      padding: 0;
+    }
+    .raw-toggle:hover { color: var(--text); }
+    .raw-text {
+      margin-top: 12px;
+      background: rgba(0,0,0,0.3);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      color: var(--muted);
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 280px;
+      overflow-y: auto;
+      display: none;
+    }
+    .raw-text::-webkit-scrollbar { width: 6px; }
+    .raw-text::-webkit-scrollbar-track { background: transparent; }
+    .raw-text::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+    /* History */
+    .history-section {
+      margin-top: 20px;
+    }
+    .history-list {
+      padding: 12px 20px;
+      display: flex; flex-direction: column; gap: 8px;
+      max-height: 280px; overflow-y: auto;
+    }
+    .history-item {
+      display: flex; align-items: center; gap: 12px;
+      padding: 10px 14px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      font-size: 13px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .history-item:hover { border-color: var(--border-hi); background: var(--blue-dim); }
+    .history-letter {
+      width: 32px; height: 32px;
+      background: linear-gradient(135deg, #1d4ed8, #0e7490);
+      border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 700; font-size: 14px;
+      font-family: 'JetBrains Mono', monospace;
+      flex-shrink: 0;
+    }
+    .history-step { flex: 1; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .history-time { font-size: 11px; color: var(--muted); flex-shrink: 0; }
+    .history-empty { padding: 20px; text-align: center; color: var(--muted); font-size: 13px; }
+
+    /* Status bar */
+    .status-bar {
+      position: fixed; bottom: 0; left: 0; right: 0; z-index: 10;
+      background: rgba(7,11,20,0.9);
+      border-top: 1px solid var(--border);
+      backdrop-filter: blur(12px);
+      padding: 8px 20px;
+      display: flex; align-items: center; justify-content: space-between;
+      font-size: 12px; color: var(--muted);
+    }
+    .status-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: var(--green);
+      display: inline-block; margin-right: 6px;
+      animation: pulse 2s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%,100% { opacity:1; } 50% { opacity:0.4; }
+    }
+
+    /* Toast */
+    .toast {
+      position: fixed; bottom: 48px; left: 50%; transform: translateX(-50%);
+      background: rgba(13,21,37,0.95);
+      border: 1px solid var(--border);
+      border-radius: 10px; padding: 10px 18px;
+      font-size: 13px; font-weight: 500;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+      z-index: 200;
+      opacity: 0; pointer-events: none;
+      transition: opacity 0.3s;
+      white-space: nowrap;
+    }
+    .toast.show { opacity: 1; }
+
+    /* Keyboard hint */
+    .kbd {
+      display: inline-block;
+      background: rgba(255,255,255,0.08);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      padding: 1px 7px; font-size: 11px;
+      font-family: 'JetBrains Mono', monospace;
+      color: var(--muted);
+    }
+
+    /* Paste tip */
+    .paste-tip {
+      font-size: 12px; color: var(--muted);
+      padding: 8px 20px;
+      text-align: center;
+    }
+
+    @media (max-width: 600px) {
+      .answer-big { flex-direction: column; text-align: center; }
+      .header { flex-direction: column; align-items: flex-start; gap: 12px; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ═══ MAIN APP ═══ -->
+<div id="app">
+
+  <!-- Header -->
+  <div class="header">
+    <div class="header-left">
+      <div class="logo-sm">🎯</div>
+      <div>
+        <div class="header-title">MCA Solver</div>
+        <div class="header-sub">Mini Code Assist — Local Web Version • <span style="color:var(--cyan);font-family:'JetBrains Mono',monospace;font-size:11px;">⚡ Деплой: <span id="deployStampHeader">28.10.2026 22:25</span></span></div>
+      </div>
+    </div>
+    <div class="header-right">
+      <div class="mode-tabs">
+        <button class="mode-tab active" id="tabSolver" onclick="setMode('solver')">Solver</button>
+        <button class="mode-tab" id="tabPython" onclick="setMode('python')">Python</button>
+        <button class="mode-tab" id="tabCpp" onclick="setMode('cpp')">C++</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Upload card -->
+  <div class="card">
+    <div class="card-header">
+      <span class="dot"></span>
+      <span id="cardLabel">Анализ вопроса</span>
+    </div>
+
+    <!-- Upload zone -->
+    <div class="upload-zone" id="uploadZone"
+         ondrop="handleDrop(event)" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)">
+      <input type="file" accept="image/*" id="fileInput" onchange="handleFile(event)">
+      <div class="upload-icon">🖼️</div>
+      <div class="upload-title">Перетащите скриншот сюда</div>
+      <div class="upload-sub">или нажмите, чтобы выбрать файл</div>
+    </div>
+
+    <div class="paste-tip">
+      Или нажмите <span class="kbd">Ctrl+V</span> чтобы вставить скриншот из буфера обмена
+    </div>
+
+    <!-- Preview -->
+    <div id="previewBox">
+      <img id="previewImg" alt="Preview">
+      <button class="preview-clear" onclick="clearImage()">✕ Очистить</button>
+    </div>
+
+    <!-- Settings -->
+    <div class="settings-row">
+      <div style="display:flex;flex-direction:column;gap:4px;flex:1;min-width:200px;">
+        <label>Gemini API Key</label>
+        <input type="password" id="apiKey" placeholder="AIza..." autocomplete="off">
+      </div>
+      <div style="display:flex;flex-direction:column;gap:4px;min-width:180px;">
+        <label>Модель</label>
+        <select id="modelSelect">
+          <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+          <option value="gemini-2.0-flash">gemini-2.0-flash</option>
+          <option value="gemini-1.5-flash">gemini-1.5-flash</option>
+          <option value="gemini-1.5-pro">gemini-1.5-pro</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Solve button -->
+    <div class="action-bar">
+      <button class="solve-btn" id="solveBtn" onclick="doSolve()" disabled>
+        <div class="spinner" id="spinner"></div>
+        <span id="solveBtnText">⚡ Анализировать</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- Result -->
+  <div id="resultCard" class="card result-card" style="display:none;">
+    <div class="card-header">
+      <span class="dot" style="background:var(--green);box-shadow:0 0 8px var(--green)"></span>
+      <span>Результат</span>
+    </div>
+    <div id="answerContent"></div>
+    <div class="raw-section">
+      <button class="raw-toggle" onclick="toggleRaw()">
+        <span id="rawArrow">▶</span> Подробное рассуждение
+      </button>
+      <div class="raw-text" id="rawText"></div>
+    </div>
+  </div>
+
+  <!-- History -->
+  <div class="history-section card" style="margin-top:20px;" id="historyCard">
+    <div class="card-header">
+      <span class="dot" style="background:var(--muted);box-shadow:none"></span>
+      <span>История</span>
+      <button onclick="clearHistory()" style="margin-left:auto;background:none;border:none;color:var(--muted);font-size:12px;cursor:pointer;">Очистить</button>
+    </div>
+    <div class="history-list" id="historyList">
+      <div class="history-empty">История пуста</div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Status bar -->
+<div class="status-bar">
+  <div><span class="status-dot"></span><span id="statusText">Готов к работе</span></div>
+  <div id="modeLabel" style="color:var(--blue);font-weight:600;">SOLVER</div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<script>
+// ════════════════════════════════════════════════════════════════
+//  5-API KEY POOL WITH AUTO-FAILOVER & RECOVERY (65s)
+// ════════════════════════════════════════════════════════════════
+const _B = [
+  "QVEuQWI4Uk42S0NxZTEtRXFvdGR6OEF0eFozS0xWamRuZUIzbkdUM3VNakxrOFlRUUhVWlE=",
+  "QVEuQWI4Uk42TDJkcDJ6Z18tcXF0NW1GNTRwcHVOeEpibjJSN216M0VUYUNYd2dVWFIxZmc=",
+  "QVEuQWI4Uk42SUNsTUtUT2FKM0V5UGNaSmo1aVhpUUxiTjlxWjdDZlBEbHZxVTVLOEVSYkE=",
+  "QVEuQWI4Uk42SXRlaWNqdWJJcjMwdk9CWHBLWkhleGpqWlFjQ1c1YkdoeGZkcXh6Wjh4SWc=",
+  "QVEuQWI4Uk42S0NxZTEtRXFvdGR6OEF0eFozS0xWamRuZUIzbkdUM3VNakxrOFlRUUhVWlE="
+];
+const DEFAULT_KEYS = _B.map(b => atob(b));
+let keyCooldowns = [0, 0, 0, 0, 0];
+
+function getNextAvailableKey(customKey) {
+  const now = Date.now();
+  if (customKey && !DEFAULT_KEYS.includes(customKey)) {
+    return [customKey, -1];
+  }
+  for (let i = 0; i < DEFAULT_KEYS.length; i++) {
+    if (now >= keyCooldowns[i]) {
+      return [DEFAULT_KEYS[i], i];
+    }
+  }
+  let soonestIdx = 0;
+  let soonestTime = keyCooldowns[0];
+  for (let i = 1; i < keyCooldowns.length; i++) {
+    if (keyCooldowns[i] < soonestTime) {
+      soonestTime = keyCooldowns[i];
+      soonestIdx = i;
+    }
+  }
+  return [DEFAULT_KEYS[soonestIdx], soonestIdx];
+}
+
+function markKeyExhausted(idx) {
+  if (idx >= 0 && idx < keyCooldowns.length) {
+    keyCooldowns[idx] = Date.now() + 65000;
+    console.warn(`Key #${idx + 1} exhausted. Cooldown 65s.`);
+  }
+}
+
+// ════════════════════════════════════════════════════════════════
+//  STATE
+// ════════════════════════════════════════════════════════════════
+let currentMode = 'solver';
+let currentImageB64 = null;
+let history = [];
+
+const SOLVER_PROMPT = `You are an Elite Academic and Competitive Test Solver with 100% precision.
+RULES:
+1. Read the ENTIRE question and ALL answer options CAREFULLY.
+2. For math/logic: compute step by step. For code: trace execution mentally.
+3. Compare ALL options (A, B, C, D). Eliminate wrong ones by proof, NOT intuition.
+4. Watch out for trick questions, double negatives, and edge cases.
+5. Output format (STRICTLY follow):
+Step: <one-sentence reasoning>
+ANSWER: <LETTER>`;
+
+const TYPER_PY_PROMPT = `You are an Elite Competitive Programmer.
+Rules:
+1. Solve the problem EXACTLY. Write READABLE Python code.
+2. Use 2-SPACE INDENTATION strictly.
+3. No OOP, no classes. Short variable names.
+4. Return ONLY the raw code. No markdown, no explanations.`;
+
+const TYPER_CPP_PROMPT = `You are an Elite Competitive Programmer.
+Rules:
+1. Solve the problem EXACTLY. Write clear C++ code.
+2. Use #include <bits/stdc++.h>.
+3. Use 2-SPACE INDENTATION.
+4. Return ONLY the raw code. No markdown, no explanations.`;
+
+// ════════════════════════════════════════════════════════════════
+//  MODE
+// ════════════════════════════════════════════════════════════════
+function setMode(mode) {
+  currentMode = mode;
+  ['solver','python','cpp'].forEach(m => {
+    document.getElementById('tab' + m.charAt(0).toUpperCase() + m.slice(1)).classList.toggle('active', m === mode);
+  });
+  const labels = { solver: 'Анализ вопроса', python: 'Генерация Python кода', cpp: 'Генерация C++ кода' };
+  document.getElementById('cardLabel').textContent = labels[mode];
+  const btnTexts = { solver: '⚡ Анализировать', python: '🐍 Сгенерировать Python', cpp: '⚙️ Сгенерировать C++' };
+  document.getElementById('solveBtnText').textContent = btnTexts[mode];
+  document.getElementById('modeLabel').textContent = { solver:'SOLVER', python:'TYPER PYTHON', cpp:'TYPER C++' }[mode];
+}
+
+// ════════════════════════════════════════════════════════════════
+//  IMAGE HANDLING
+// ════════════════════════════════════════════════════════════════
+function handleFile(e) {
+  const file = e.target.files[0];
+  if (file) setImage(file);
+}
+
+function handleDrop(e) {
+  e.preventDefault();
+  document.getElementById('uploadZone').classList.remove('drag-over');
+  const file = e.dataTransfer.files[0];
+  if (file && file.type.startsWith('image/')) setImage(file);
+}
+
+function handleDragOver(e) {
+  e.preventDefault();
+  document.getElementById('uploadZone').classList.add('drag-over');
+}
+
+function handleDragLeave(e) {
+  document.getElementById('uploadZone').classList.remove('drag-over');
+}
+
+function setImage(file) {
+  const reader = new FileReader();
+  reader.onload = ev => {
+    const dataUrl = ev.target.result;
+    currentImageB64 = dataUrl.split(',')[1];
+    document.getElementById('previewImg').src = dataUrl;
+    document.getElementById('previewBox').style.display = 'block';
+    document.getElementById('uploadZone').style.display = 'none';
+    document.getElementById('solveBtn').disabled = false;
+    setStatus('Изображение загружено. Нажмите "Анализировать".');
+  };
+  reader.readAsDataURL(file);
+}
+
+function clearImage() {
+  currentImageB64 = null;
+  document.getElementById('previewBox').style.display = 'none';
+  document.getElementById('uploadZone').style.display = 'block';
+  document.getElementById('fileInput').value = '';
+  document.getElementById('solveBtn').disabled = true;
+  document.getElementById('resultCard').style.display = 'none';
+  setStatus('Готов к работе');
+}
+
+// Paste from clipboard (Ctrl+V)
+document.addEventListener('paste', async (e) => {
+  if (!authed) return;
+  const items = e.clipboardData?.items;
+  if (!items) return;
+  for (const item of items) {
+    if (item.type.startsWith('image/')) {
+      const file = item.getAsFile();
+      if (file) { setImage(file); showToast('📋 Скриншот вставлен!'); }
+      break;
+    }
+  }
+});
+
+// ════════════════════════════════════════════════════════════════
+//  GEMINI API CALL (AUTO-FAILOVER ACROSS 5 KEYS WITH 65s RECOVERY)
+// ════════════════════════════════════════════════════════════════
+async function callGemini(customKey, model, systemPrompt, userPrompt, imageB64) {
+  let lastErr = null;
+  for (let attempt = 0; attempt < DEFAULT_KEYS.length; attempt++) {
+    const [apiKey, keyIdx] = getNextAvailableKey(customKey);
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    const parts = [{ text: userPrompt }];
+    if (imageB64) {
+      parts.push({ inline_data: { mime_type: 'image/png', data: imageB64 } });
+    }
+    const payload = {
+      contents: [{ parts }],
+      system_instruction: { parts: [{ text: systemPrompt }] },
+      generationConfig: { temperature: 0.1, topP: 0.95 }
+    };
+    try {
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        const errMsg = err?.error?.message || `HTTP ${resp.status}`;
+        if (resp.status === 429 || errMsg.includes('quota') || errMsg.includes('RESOURCE_EXHAUSTED')) {
+          markKeyExhausted(keyIdx);
+          lastErr = new Error(`Key #${keyIdx + 1} quota limit reached. Auto-switching...`);
+          continue;
+        }
+        throw new Error(errMsg);
+      }
+      const data = await resp.json();
+      const text = data?.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
+      return text;
+    } catch (e) {
+      if (e.message && (e.message.includes('429') || e.message.includes('quota') || e.message.includes('RESOURCE_EXHAUSTED'))) {
+        markKeyExhausted(keyIdx);
+        lastErr = e;
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw lastErr || new Error('Все 5 API ключей исчерпали минутный лимит. Попробуйте через 1 минуту.');
+}
+
+// ════════════════════════════════════════════════════════════════
+//  SOLVE
+// ════════════════════════════════════════════════════════════════
+async function doSolve() {
+  if (!currentImageB64) return;
+  const apiKey = document.getElementById('apiKey').value.trim() || DEFAULT_KEYS[0];
+  const model = document.getElementById('modelSelect').value;
+
+  // Save key
+  if (apiKey) localStorage.setItem('mca_api_key', apiKey);
+
+  setBusy(true);
+  setStatus('Отправляю запрос к Gemini...');
+
+  let systemPrompt, userPrompt;
+  if (currentMode === 'solver') {
+    systemPrompt = SOLVER_PROMPT;
+    userPrompt = 'Carefully solve this question with 100% accuracy. End with ANSWER: LETTER.';
+  } else if (currentMode === 'python') {
+    systemPrompt = TYPER_PY_PROMPT;
+    userPrompt = 'Solve this programming problem and return Python code. Environment: PyPy.';
+  } else {
+    systemPrompt = TYPER_CPP_PROMPT;
+    userPrompt = 'Solve this programming problem and return C++ code. Environment: GCC.';
+  }
+
+  try {
+    const result = await callGemini(apiKey, model, systemPrompt, userPrompt, currentImageB64);
+    setStatus('Готово!');
+    displayResult(result);
+    addHistory(result);
+  } catch (err) {
+    setStatus('Ошибка: ' + err.message);
+    showToast('❌ ' + err.message);
+    document.getElementById('resultCard').style.display = 'none';
+  } finally {
+    setBusy(false);
+  }
+}
+
+// ════════════════════════════════════════════════════════════════
+//  DISPLAY RESULT
+// ════════════════════════════════════════════════════════════════
+function displayResult(text) {
+  const card = document.getElementById('resultCard');
+  const content = document.getElementById('answerContent');
+  const rawText = document.getElementById('rawText');
+
+  rawText.textContent = text;
+  card.style.display = 'block';
+
+  if (currentMode === 'solver') {
+    // Parse ANSWER
+    const matchFull = text.match(/ANSWER\s*:\s*([A-D])/i);
+    const letter = matchFull ? matchFull[1].toUpperCase() : null;
+    const stepMatch = text.match(/Step\s*:\s*(.+)/i);
+    const step = stepMatch ? stepMatch[1].trim() : '';
+
+    if (letter) {
+      content.innerHTML = `
+        <div class="answer-big">
+          <div class="answer-letter">${letter}</div>
+          <div class="answer-meta">
+            <div class="answer-label">Правильный ответ</div>
+            <div class="answer-text">Вариант ${letter}</div>
+            ${step ? `<div class="answer-step">💡 ${step}</div>` : ''}
+          </div>
+        </div>`;
+    } else {
+      // Fallback: look for any letter mention
+      const fallback = text.match(/\b([A-D])\b/g);
+      const fb = fallback ? fallback[fallback.length - 1] : '?';
+      content.innerHTML = `
+        <div class="answer-big">
+          <div class="answer-letter" style="background:linear-gradient(135deg,#92400e,#78350f)">${fb}</div>
+          <div class="answer-meta">
+            <div class="answer-label">Ответ (неточный)</div>
+            <div class="answer-text" style="color:var(--yellow)">Вариант ${fb}</div>
+            <div class="answer-step">⚠️ Модель не дала чёткого ответа. Проверьте рассуждение.</div>
+          </div>
+        </div>`;
+    }
+  } else {
+    // Code mode
+    const lang = currentMode === 'python' ? 'python' : 'cpp';
+    const cleaned = text.replace(/```[\w\+]*\n?/g, '').replace(/```/g, '').trim();
+    content.innerHTML = `<div style="padding:16px 20px;">
+      <pre style="background:rgba(0,0,0,0.4);border:1px solid var(--border);border-radius:10px;padding:16px;font-family:'JetBrains Mono',monospace;font-size:13px;color:#a5f3fc;overflow-x:auto;white-space:pre;max-height:400px;overflow-y:auto;">${escHtml(cleaned)}</pre>
+      <button onclick="copyCode('${encodeURIComponent(cleaned)}')"
+        style="margin-top:10px;padding:8px 18px;background:var(--blue-dim);border:1px solid var(--border-hi);border-radius:8px;color:#fff;font-size:13px;cursor:pointer;font-weight:600;">
+        📋 Копировать код
+      </button>
+    </div>`;
+  }
+
+  card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function copyCode(enc) {
+  navigator.clipboard.writeText(decodeURIComponent(enc)).then(() => showToast('✅ Скопировано!'));
+}
+
+// ════════════════════════════════════════════════════════════════
+//  RAW TOGGLE
+// ════════════════════════════════════════════════════════════════
+function toggleRaw() {
+  const raw = document.getElementById('rawText');
+  const arrow = document.getElementById('rawArrow');
+  const shown = raw.style.display === 'block';
+  raw.style.display = shown ? 'none' : 'block';
+  arrow.textContent = shown ? '▶' : '▼';
+}
+
+// ════════════════════════════════════════════════════════════════
+//  HISTORY
+// ════════════════════════════════════════════════════════════════
+function addHistory(text) {
+  const matchFull = text.match(/ANSWER\s*:\s*([A-D])/i);
+  const letter = matchFull ? matchFull[1].toUpperCase() : '?';
+  const stepMatch = text.match(/Step\s*:\s*(.+)/i);
+  const step = stepMatch ? stepMatch[1].trim() : text.trim().substring(0, 80);
+  const now = new Date();
+  const timeStr = `${now.getHours()}:${String(now.getMinutes()).padStart(2,'0')}`;
+
+  history.unshift({ letter, step, time: timeStr, raw: text, mode: currentMode });
+  if (history.length > 30) history.pop();
+  saveHistory();
+  renderHistory();
+}
+
+function renderHistory() {
+  const list = document.getElementById('historyList');
+  if (!history.length) {
+    list.innerHTML = '<div class="history-empty">История пуста</div>';
+    return;
+  }
+  list.innerHTML = history.map((h, i) => `
+    <div class="history-item" onclick="showHistoryItem(${i})">
+      <div class="history-letter">${h.mode === 'solver' ? h.letter : (h.mode === 'python' ? '🐍' : '⚙️')}</div>
+      <div class="history-step">${escHtml(h.step)}</div>
+      <div class="history-time">${h.time}</div>
+    </div>`).join('');
+}
+
+function showHistoryItem(i) {
+  const h = history[i];
+  displayResult(h.raw);
+}
+
+function clearHistory() {
+  history = [];
+  saveHistory();
+  renderHistory();
+}
+
+function saveHistory() {
+  try { localStorage.setItem('mca_history', JSON.stringify(history)); } catch(e) {}
+}
+
+function loadFromStorage() {
+  try {
+    const h = localStorage.getItem('mca_history');
+    if (h) history = JSON.parse(h);
+    renderHistory();
+  } catch(e) {}
+  const key = localStorage.getItem('mca_api_key');
+  if (key) document.getElementById('apiKey').value = key;
+}
+
+// ════════════════════════════════════════════════════════════════
+//  UI HELPERS
+// ════════════════════════════════════════════════════════════════
+function setBusy(busy) {
+  document.getElementById('spinner').style.display = busy ? 'block' : 'none';
+  document.getElementById('solveBtn').disabled = busy || !currentImageB64;
+  document.getElementById('solveBtnText').textContent =
+    busy ? 'Анализирую...' : { solver:'⚡ Анализировать', python:'🐍 Сгенерировать Python', cpp:'⚙️ Сгенерировать C++' }[currentMode];
+}
+
+function setStatus(msg) {
+  document.getElementById('statusText').textContent = msg;
+}
+
+let toastTimer;
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 2800);
+}
+
+// Initialize storage on load
+window.addEventListener('DOMContentLoaded', () => {
+  loadFromStorage();
+  const inp = document.getElementById('apiKey');
+  if (inp && !inp.value) {
+    inp.value = DEFAULT_KEYS[0];
+  }
+});
+</script>
+</body>
+</html>
+
