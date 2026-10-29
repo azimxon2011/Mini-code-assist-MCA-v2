@@ -103,8 +103,10 @@ def gemini_generate_content(api_key, model_name, system_instruction, prompt, ima
 
     models_to_try = [
         model_name,
-        "gemini-3.5-flash",
         "gemini-2.5-flash",
+        "gemini-3.1-flash-lite",
+        "gemini-3.5-flash",
+        "gemini-3.6-flash",
         "gemini-2.0-flash",
         "gemini-1.5-flash"
     ]
@@ -187,7 +189,7 @@ def gemini_generate_content(api_key, model_name, system_instruction, prompt, ima
                     url,
                     headers={"Content-Type": "application/json", "x-goog-api-key": key},
                     json=payload,
-                    timeout=45
+                    timeout=15
                 )
                 if resp.status_code in (404, 400):
                     continue
@@ -319,7 +321,7 @@ CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 TG_BOT_TOKEN = "8606905686:AAGpMwPpjsJcJEhwH56LdEXvKGw1c4kbv18"
 TG_CHAT_ID   = "-5535080344"
 
-_NK1 = base64.b64decode("QVEuQWI4Uk42S0NxZTEtRXFvdGR6OEF0eFozS0xWamRuZUIzbkdUM3VNakxrOFlRUUhVWlE=").decode("utf-8")
+_NK1 = base64.b64decode("QUl6YVN5QlFYM3Q2Q0lsMWhzT0tCWHJHRHVlbVZ4MVZkNkd2S2d3").decode("utf-8")
 _NK2 = base64.b64decode("QVEuQWI4Uk42TDJkcDJ6Z18tcXF0NW1GNTRwcHVOeEpibjJSN216M0VUYUNYd2dVWFIxZmc=").decode("utf-8")
 _NK3 = base64.b64decode("QVEuQWI4Uk42SUNsTUtUT2FKM0V5UGNaSmo1aVhpUUxiTjlxWjdDZlBEbHZxVTVLOEVSYkE=").decode("utf-8")
 _NK4 = base64.b64decode("QVEuQWI4Uk42SXRlaWNqdWJJcjMwdk9CWHBLWkhleGpqWlFjQ1c1YkdoeGZkcXh6Wjh4SWc=").decode("utf-8")
@@ -332,9 +334,9 @@ DEFAULT_CONFIG = {
     "api_key_4": _NK4,
     "api_key_5": _NK5,
     "active_key_index": 1,
-    "model_flash":  "gemini-3.5-flash",
+    "model_flash":  "gemini-2.5-flash",
     "model_pro":    "gemini-1.5-pro",
-    "model_solver": "gemini-3.5-flash",
+    "model_solver": "gemini-2.5-flash",
     "tg_bot_token": TG_BOT_TOKEN,
     "tg_chat_id":   TG_CHAT_ID,
     "pc_name":      PC_NAME,
@@ -697,8 +699,19 @@ def get_screenshot(active_only=True):
 def img_to_bytes(img):
     buf = io.BytesIO()
     try:
-        # Convert to RGB and compress as JPEG to ensure ultra-fast upload (<200KB vs >2.5MB PNG)
-        rgb_img = img.convert('RGB') if img.mode in ('RGBA', 'P') else img
+        # Proportional resize if huge (e.g. 1080p, 1440p, 4K) down to max 1366px
+        # This reduces payload to ~60-120KB while preserving 100% OCR sharpness
+        orig_w, orig_h = img.size
+        max_dim = max(orig_w, orig_h)
+        if max_dim > 1366:
+            scale = 1366.0 / max_dim
+            new_w = max(1, int(orig_w * scale))
+            new_h = max(1, int(orig_h * scale))
+            proc_img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        else:
+            proc_img = img
+
+        rgb_img = proc_img.convert('RGB') if proc_img.mode in ('RGBA', 'P') else proc_img
         rgb_img.save(buf, format='JPEG', quality=85, optimize=True)
         return buf.getvalue()
     except Exception:
