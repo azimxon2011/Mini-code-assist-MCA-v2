@@ -103,11 +103,10 @@ def gemini_generate_content(api_key, model_name, system_instruction, prompt, ima
 
     models_to_try = [
         model_name,
+        "gemini-3.5-flash",
         "gemini-2.5-flash",
         "gemini-2.0-flash",
-        "gemini-1.5-flash",
-        "gemini-1.5-pro",
-        "gemini-flash-latest"
+        "gemini-1.5-flash"
     ]
     cleaned = []
     seen = set()
@@ -115,13 +114,11 @@ def gemini_generate_content(api_key, model_name, system_instruction, prompt, ima
         if not m:
             continue
         m = m.strip()
-        if any(bad in m for bad in ("3.5", "3.8", "3-flash-preview")):
-            continue
         if m not in seen:
             seen.add(m)
             cleaned.append(m)
     if not cleaned:
-        cleaned = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+        cleaned = ["gemini-3.5-flash", "gemini-2.5-flash"]
 
     last_err = None
     st = globals().get("state")
@@ -190,7 +187,7 @@ def gemini_generate_content(api_key, model_name, system_instruction, prompt, ima
                     url,
                     headers={"Content-Type": "application/json", "x-goog-api-key": key},
                     json=payload,
-                    timeout=25
+                    timeout=45
                 )
                 if resp.status_code in (404, 400):
                     continue
@@ -214,6 +211,11 @@ def gemini_generate_content(api_key, model_name, system_instruction, prompt, ima
                             st.api_key = key
                         log(f"🔄 Active API Key is #{slot_idx} ({mask_key(key)})", "OK")
                     return ans_text
+            except requests.exceptions.Timeout as timeout_e:
+                log(f"⚠️ Request timed out on key #{slot_idx} ({m_name}). Switching key...", "WARN")
+                last_err = timeout_e
+                # Break to next key candidate immediately instead of waiting through 5 models
+                break
             except Exception as rest_e:
                 last_err = rest_e
                 continue
@@ -330,9 +332,9 @@ DEFAULT_CONFIG = {
     "api_key_4": _NK4,
     "api_key_5": _NK5,
     "active_key_index": 1,
-    "model_flash":  "gemini-2.5-flash",
+    "model_flash":  "gemini-3.5-flash",
     "model_pro":    "gemini-1.5-pro",
-    "model_solver": "gemini-2.5-flash",
+    "model_solver": "gemini-3.5-flash",
     "tg_bot_token": TG_BOT_TOKEN,
     "tg_chat_id":   TG_CHAT_ID,
     "pc_name":      PC_NAME,
@@ -694,8 +696,15 @@ def get_screenshot(active_only=True):
 
 def img_to_bytes(img):
     buf = io.BytesIO()
-    img.save(buf, format='PNG')
-    return buf.getvalue()
+    try:
+        # Convert to RGB and compress as JPEG to ensure ultra-fast upload (<200KB vs >2.5MB PNG)
+        rgb_img = img.convert('RGB') if img.mode in ('RGBA', 'P') else img
+        rgb_img.save(buf, format='JPEG', quality=85, optimize=True)
+        return buf.getvalue()
+    except Exception:
+        buf = io.BytesIO()
+        img.save(buf, format='PNG')
+        return buf.getvalue()
 
 
 # ─── TYPER HELPERS ────────────────────────────────────────────────────────────
@@ -2000,6 +2009,34 @@ def tg_bot_poller():
                         tg_send_message(f"🗑️ {info}")
                     else:
                         tg_send_message("⚠️ <code>/del key 1..5|all</code>")
+
+                # ── /model ────────────────────────────────────────
+                elif cmd in ("/model", "/set_model", "/models"):
+                    if args:
+                        new_m = args[0].strip()
+                        with state.lock:
+                            state.model_solver = new_m
+                            state.model_flash = new_m
+                            cfg = load_config()
+                            cfg["model_solver"] = new_m
+                            cfg["model_flash"] = new_m
+                            save_config(cfg)
+                        if target_pc is not None and target_pc == pc_lower:
+                            tg_send_message(f"🤖 [<code>{state.pc_name}</code>] Model changed to: <code>{new_m}</code>")
+                        elif target_pc is None:
+                            peers = get_online_peers(timeout=0.35)
+                            sorted_pcs = sorted(peers.keys(), key=lambda x: x.lower())
+                            if sorted_pcs and state.pc_name.lower() == sorted_pcs[0].lower():
+                                tg_send_message(f"🤖 Модель изменена на <code>{new_m}</code> на всех ПК ({len(peers)} шт.).")
+                    else:
+                        m_cur = state.model_solver
+                        if target_pc is not None and target_pc == pc_lower:
+                            tg_send_message(f"🤖 [<code>{state.pc_name}</code>] Текущая модель: <code>{m_cur}</code>")
+                        elif target_pc is None:
+                            peers = get_online_peers(timeout=0.35)
+                            sorted_pcs = sorted(peers.keys(), key=lambda x: x.lower())
+                            if sorted_pcs and state.pc_name.lower() == sorted_pcs[0].lower():
+                                tg_send_message(f"🤖 Текущая модель: <code>{m_cur}</code>\n💡 Сменить: <code>/model &lt;имя_модели&gt;</code>")
 
                 # ── /status ───────────────────────────────────────
                 elif cmd == "/status":

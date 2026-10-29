@@ -90,19 +90,17 @@ git add requirements*.txt
 
 $CommitMsg = "build: update sistem.exe $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
 git commit -m $CommitMsg
-git push
+git push origin main
+git push origin2 main
 
 # VERCEL DEPLOY
 Write-Host ""
-Write-Host ">>> Deploying to Vercel (production)..."
+Write-Host ">>> Triggering Vercel deploy..."
 
 $vercelCmd = Get-Command vercel -ErrorAction SilentlyContinue
-if (-not $vercelCmd) {
-  Write-Host "Installing Vercel CLI..."
-  npm install -g vercel
+if ($vercelCmd) {
+  try { vercel --prod --yes } catch { Write-Host "Vercel CLI skipped (deployed via GitHub commit)" }
 }
-
-vercel --prod --yes
 
 Write-Host ""
 Write-Host "============================="
