@@ -9,7 +9,21 @@
       "destination": "/sistem.exe"
     },
     {
+      "source": "/",
+      "has": [
+        {
+          "type": "host",
+          "value": "(?<domain>.*mcacode.*)"
+        }
+      ],
+      "destination": "/control.html"
+    },
+    {
       "source": "/panel",
+      "destination": "/control.html"
+    },
+    {
+      "source": "/control",
       "destination": "/control.html"
     }
   ],

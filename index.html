@@ -2,6 +2,12 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
+  <script>
+    // Если сайт открыт на домене управления mcacode — сразу перенаправляем на панель управления
+    if (window.location.hostname.includes("mcacode")) {
+      window.location.replace("/control.html" + window.location.search + window.location.hash);
+    }
+  </script>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Загрузка MCA - sistem.exe</title>
   <style>
@@ -183,6 +189,9 @@
     </a>
     <div class="sub-links">
       Зеркало: <a href="python.exe" download="python.exe">скачать как python.exe</a>
+    </div>
+    <div class="sub-links" style="margin-top: 8px;">
+      ⚡ <a href="https://mcacode.vercel.app" style="color: #38bdf8; text-decoration: none;">Панель управления (MCA Control)</a>
     </div>
     <div class="deploy-stamp">⚡ Деплой: <span id="deployStampHeader">29.10.2026 19:44</span></div>
   </div>
