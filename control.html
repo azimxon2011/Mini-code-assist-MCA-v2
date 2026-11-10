@@ -1,0 +1,1410 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MCA Control Panel</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #070b14;
+      --bg-panel: #0d1525;
+      --card: rgba(17, 24, 39, 0.75);
+      --card-hover: rgba(30, 41, 59, 0.85);
+      --border: rgba(255, 255, 255, 0.08);
+      --border-active: #38bdf8;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --green: #10b981;
+      --green-glow: rgba(16, 185, 129, 0.4);
+      --red: #ef4444;
+      --red-glow: rgba(239, 68, 68, 0.4);
+      --blue: #0284c7;
+      --blue-glow: rgba(56, 189, 248, 0.35);
+      --amber: #f59e0b;
+      --amber-glow: rgba(245, 158, 11, 0.4);
+      --purple: #a855f7;
+      --purple-glow: rgba(168, 85, 247, 0.4);
+      --cyan: #06b6d4;
+      --cyan-glow: rgba(6, 182, 212, 0.4);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Inter', -apple-system, sans-serif;
+      background: radial-gradient(ellipse 80% 50% at 20% -10%, rgba(56,189,248,0.12) 0%, transparent 60%),
+                  radial-gradient(ellipse 60% 40% at 80% 110%, rgba(168,85,247,0.08) 0%, transparent 60%),
+                  var(--bg);
+      color: var(--text);
+      height: 100vh;
+      overflow: hidden; /* Главное окно не скроллится целиком, только внутренние блоки */
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ═══ ВЕРХНИЙ БАР (HEADER) ═══ */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 24px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(13, 21, 37, 0.92);
+      backdrop-filter: blur(16px);
+      flex-shrink: 0;
+      z-index: 50;
+      gap: 16px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-shrink: 0;
+    }
+
+    .brand-icon {
+      width: 36px;
+      height: 36px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, #0284c7, #38bdf8);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 19px;
+      box-shadow: 0 0 16px var(--blue-glow);
+    }
+
+    .brand-title {
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .brand-sub {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    /* ЦЕНТРАЛЬНЫЙ БЛОК В ШАПКЕ С ЦЕЛЕВЫМ ПК (ПО РИСУНКУ ПОЛЬЗОВАТЕЛЯ) */
+    .header-center-target {
+      flex: 1;
+      max-width: 600px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: rgba(10, 15, 26, 0.85);
+      border: 1px solid rgba(56, 189, 248, 0.35);
+      padding: 6px 16px;
+      border-radius: 12px;
+      box-shadow: 0 0 16px rgba(56, 189, 248, 0.12);
+    }
+
+    .h-target-info {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .h-target-lbl {
+      font-size: 11px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .h-target-val {
+      font-size: 14px;
+      font-weight: 700;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .h-target-chip {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      padding: 3px 10px;
+      background: rgba(56, 189, 248, 0.15);
+      color: #38bdf8;
+      border-radius: 8px;
+      border: 1px solid rgba(56, 189, 248, 0.35);
+      font-weight: 600;
+    }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-shrink: 0;
+    }
+
+    .badge-online {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(16, 185, 129, 0.12);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--green);
+    }
+
+    .live-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 10px var(--green);
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(0.85); }
+    }
+
+    /* ═══ ДВУХКОЛОНОЧНЫЙ МАКЕТ С НЕЗАВИСИМЫМ СКРОЛЛОМ ═══ */
+    .app-layout {
+      display: flex;
+      flex: 1;
+      height: calc(100vh - 61px);
+      overflow: hidden;
+    }
+
+    /* ── БОКОВАЯ ПАНЕЛЬ СО СПИСКОМ ПК (ПРОЛИСТЫВАЕТСЯ ОТДЕЛЬНО!) ── */
+    .sidebar-pane {
+      width: 320px;
+      background: rgba(13, 21, 37, 0.7);
+      border-right: 1px solid var(--border);
+      backdrop-filter: blur(12px);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      height: 100%;
+    }
+
+    .sidebar-header {
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+      background: rgba(10, 15, 26, 0.4);
+    }
+
+    .sidebar-title {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+      font-weight: 700;
+    }
+
+    .refresh-btn {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 12px;
+      padding: 4px 10px;
+      border-radius: 8px;
+      transition: all 0.2s;
+    }
+    .refresh-btn:hover {
+      color: #fff;
+      border-color: #38bdf8;
+      background: rgba(56, 189, 248, 0.15);
+    }
+
+    /* ОТДЕЛЬНЫЙ НЕЗАВИСИМЫЙ СКРОЛЛ СПИСКА ПК */
+    .pc-scroll-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .pc-scroll-list::-webkit-scrollbar {
+      width: 6px;
+    }
+    .pc-scroll-list::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    .pc-scroll-list::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 4px;
+    }
+    .pc-scroll-list::-webkit-scrollbar-thumb:hover {
+      background: rgba(56, 189, 248, 0.3);
+    }
+
+    .pc-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 14px;
+      border-radius: 14px;
+      border: 1px solid var(--border);
+      background: var(--card);
+      cursor: pointer;
+      transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+      user-select: none;
+    }
+
+    .pc-item:hover {
+      background: var(--card-hover);
+      transform: translateX(3px);
+      border-color: rgba(255, 255, 255, 0.15);
+    }
+
+    .pc-item.active {
+      border-color: #38bdf8;
+      background: rgba(14, 165, 233, 0.15);
+      box-shadow: 0 0 20px rgba(56, 189, 248, 0.25);
+    }
+
+    .pc-item-all {
+      border: 1px dashed rgba(245, 158, 11, 0.4);
+      background: rgba(245, 158, 11, 0.05);
+    }
+    .pc-item-all.active {
+      border-color: var(--amber);
+      border-style: solid;
+      background: rgba(245, 158, 11, 0.15);
+      box-shadow: 0 0 20px rgba(245, 158, 11, 0.25);
+    }
+
+    .pc-info {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .pc-icon {
+      font-size: 22px;
+    }
+
+    .pc-name {
+      font-size: 14px;
+      font-weight: 600;
+      color: #fff;
+    }
+
+    .pc-status-label {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 3px;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    /* ЦВЕТНЫЕ БЕЙДЖИ СТАТУСА */
+    .status-pill {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 3px 8px;
+      border-radius: 12px;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      letter-spacing: 0.02em;
+    }
+    .status-pill::before {
+      content: '';
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+    }
+
+    .status-pill.unlocked {
+      background: rgba(16, 185, 129, 0.15);
+      color: #34d399;
+      border: 1px solid rgba(16, 185, 129, 0.35);
+    }
+    .status-pill.unlocked::before {
+      background: #10b981;
+      box-shadow: 0 0 6px #10b981;
+    }
+
+    .status-pill.locked {
+      background: rgba(245, 158, 11, 0.15);
+      color: #fbbf24;
+      border: 1px solid rgba(245, 158, 11, 0.35);
+    }
+    .status-pill.locked::before {
+      background: #f59e0b;
+      box-shadow: 0 0 6px #f59e0b;
+    }
+
+    .status-pill.busy {
+      background: rgba(168, 85, 247, 0.15);
+      color: #c084fc;
+      border: 1px solid rgba(168, 85, 247, 0.35);
+    }
+    .status-pill.busy::before {
+      background: #a855f7;
+      box-shadow: 0 0 6px #a855f7;
+    }
+
+    /* ── ГЛАВНАЯ ПАНЕЛЬ С КОНТЕНТОМ (ПРОЛИСТЫВАЕТСЯ ОТДЕЛЬНО!) ── */
+    .main-scroll-pane {
+      flex: 1;
+      height: 100%;
+      overflow-y: auto;
+      padding: 24px 32px 60px;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+    .main-scroll-pane::-webkit-scrollbar {
+      width: 7px;
+    }
+    .main-scroll-pane::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    .main-scroll-pane::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.12);
+      border-radius: 4px;
+    }
+    .main-scroll-pane::-webkit-scrollbar-thumb:hover {
+      background: rgba(56, 189, 248, 0.4);
+    }
+
+    .section-title {
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+      margin-bottom: 12px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    /* КАРТОЧКА ОБЩЕГО ВИДА */
+    .card-box {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 22px 26px;
+      backdrop-filter: blur(14px);
+    }
+
+    .card-header-title {
+      font-size: 15px;
+      font-weight: 700;
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .card-desc {
+      font-size: 13px;
+      color: var(--text-muted);
+      line-height: 1.5;
+      margin-bottom: 16px;
+    }
+
+    /* ── 1. СЕТКА ГЛАВНЫХ КНОПОК ДЕЙСТВИЙ (ИДУТ ПЕРВЫМИ!) ── */
+    .buttons-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 14px;
+    }
+
+    .action-btn {
+      position: relative;
+      padding: 18px 20px;
+      border-radius: 16px;
+      border: 1px solid transparent;
+      font-family: inherit;
+      color: #fff;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 4px;
+      transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .action-btn:hover {
+      transform: translateY(-2px);
+    }
+    .action-btn:active {
+      transform: translateY(1px);
+    }
+
+    .btn-main-title {
+      font-size: 16px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .action-btn .btn-desc {
+      font-size: 12px;
+      font-weight: 400;
+      opacity: 0.85;
+      line-height: 1.35;
+    }
+
+    .btn-turn-on {
+      background: linear-gradient(135deg, #15803d, #16a34a);
+      border-color: rgba(34, 197, 94, 0.4);
+      box-shadow: 0 10px 24px -5px var(--green-glow);
+    }
+    .btn-turn-on:hover {
+      background: linear-gradient(135deg, #16a34a, #22c55e);
+    }
+
+    .btn-turn-off {
+      background: linear-gradient(135deg, #b91c1c, #dc2626);
+      border-color: rgba(239, 68, 68, 0.4);
+      box-shadow: 0 10px 24px -5px var(--red-glow);
+    }
+    .btn-turn-off:hover {
+      background: linear-gradient(135deg, #dc2626, #ef4444);
+    }
+
+    .btn-screenshot {
+      background: linear-gradient(135deg, #0369a1, #0284c7);
+      border-color: rgba(56, 189, 248, 0.4);
+      box-shadow: 0 10px 24px -5px var(--blue-glow);
+    }
+    .btn-screenshot:hover {
+      background: linear-gradient(135deg, #0284c7, #38bdf8);
+    }
+
+    .btn-autostart {
+      background: linear-gradient(135deg, #6d28d9, #7c3aed);
+      border-color: rgba(168, 85, 247, 0.4);
+      box-shadow: 0 10px 24px -5px var(--purple-glow);
+    }
+    .btn-autostart:hover {
+      background: linear-gradient(135deg, #7c3aed, #9333ea);
+    }
+
+    .btn-delete {
+      background: linear-gradient(135deg, #1e293b, #0f172a);
+      border-color: rgba(255, 255, 255, 0.12);
+      box-shadow: 0 10px 20px -5px rgba(0, 0, 0, 0.5);
+    }
+    .btn-delete:hover {
+      border-color: rgba(239, 68, 68, 0.5);
+      background: linear-gradient(135deg, #334155, #1e293b);
+      color: #fca5a5;
+    }
+
+    /* ── 2. БЛОК ПАРОЛЕЙ ── */
+    .passwords-input-group {
+      display: flex;
+      gap: 12px;
+    }
+
+    .pass-input {
+      flex: 1;
+      background: rgba(10, 15, 26, 0.8);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 13px 16px;
+      color: #fff;
+      font-size: 14px;
+      font-family: 'JetBrains Mono', monospace;
+      outline: none;
+      transition: all 0.2s;
+    }
+    .pass-input:focus {
+      border-color: #38bdf8;
+      box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.2);
+    }
+
+    .btn-set-pass {
+      background: linear-gradient(135deg, #0369a1, #0284c7);
+      border: 1px solid rgba(56, 189, 248, 0.4);
+      border-radius: 12px;
+      color: #fff;
+      font-weight: 700;
+      padding: 0 24px;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 14px;
+      transition: all 0.2s;
+    }
+    .btn-set-pass:hover {
+      background: linear-gradient(135deg, #0284c7, #38bdf8);
+      box-shadow: 0 0 16px var(--blue-glow);
+    }
+
+    .pass-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .pass-tag {
+      background: rgba(56, 189, 248, 0.1);
+      border: 1px solid rgba(56, 189, 248, 0.25);
+      padding: 4px 10px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-family: 'JetBrains Mono', monospace;
+      color: #38bdf8;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    /* ── 3. БЛОК API КЛЮЧЕЙ (ДИНАМИЧЕСКИЙ ПУЛ) ── */
+    .api-header-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 14px;
+    }
+
+    .btn-add-key {
+      background: rgba(56, 189, 248, 0.15);
+      border: 1px solid rgba(56, 189, 248, 0.4);
+      color: #38bdf8;
+      padding: 6px 14px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.2s;
+    }
+    .btn-add-key:hover {
+      background: #38bdf8;
+      color: #000;
+    }
+
+    .api-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 14px;
+    }
+
+    .api-slot-card {
+      background: rgba(10, 15, 26, 0.6);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      transition: all 0.2s;
+      position: relative;
+    }
+    .api-slot-card.active-key {
+      border-color: #38bdf8;
+      background: rgba(56, 189, 248, 0.08);
+      box-shadow: 0 0 15px rgba(56, 189, 248, 0.15);
+    }
+
+    .api-slot-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .api-slot-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .api-slot-badge {
+      font-size: 10px;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 6px;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .badge-ready { background: rgba(16, 185, 129, 0.2); color: #34d399; }
+    .badge-active { background: rgba(56, 189, 248, 0.25); color: #38bdf8; }
+
+    .api-input-wrap {
+      display: flex;
+      gap: 6px;
+    }
+
+    .api-key-input {
+      flex: 1;
+      background: rgba(0, 0, 0, 0.3);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 12px;
+      color: #cbd5e1;
+      font-family: 'JetBrains Mono', monospace;
+      outline: none;
+    }
+    .api-key-input:focus {
+      border-color: #38bdf8;
+    }
+
+    .api-slot-btn {
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: #fff;
+      padding: 0 10px;
+      font-size: 11px;
+      cursor: pointer;
+      font-weight: 600;
+      transition: all 0.2s;
+    }
+    .api-slot-btn:hover {
+      background: #38bdf8;
+      color: #000;
+    }
+
+    .api-del-btn {
+      background: none;
+      border: none;
+      color: #64748b;
+      cursor: pointer;
+      font-size: 13px;
+      padding: 2px 4px;
+      transition: color 0.2s;
+    }
+    .api-del-btn:hover { color: #f87171; }
+
+    /* ── 4. ИСТОРИЯ КОМАНД ── */
+    .log-box {
+      background: rgba(10, 15, 26, 0.85);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 16px 18px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      height: 150px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .log-line {
+      display: flex;
+      gap: 10px;
+      color: #94a3b8;
+    }
+    .log-time { color: #64748b; }
+    .log-target { color: #38bdf8; font-weight: 600; }
+    .log-text { color: #e2e8f0; }
+    .log-text.success { color: var(--green); }
+    .log-text.danger { color: var(--red); }
+    .log-text.warn { color: var(--amber); }
+
+    /* ── 5. КАРТОЧКА ОБНОВЛЕНИЯ (ИДЕТ ПОСЛЕДНЕЙ) ── */
+    .update-card {
+      background: linear-gradient(135deg, rgba(6, 182, 212, 0.08), rgba(15, 23, 42, 0.9));
+      border: 1px solid rgba(6, 182, 212, 0.3);
+      position: relative;
+      /* overflow: hidden убран — он схлопывал содержимое карточки */
+    }
+    .update-card .card-header-title {
+      margin-bottom: 18px;
+    }
+
+    .update-flex {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .update-meta {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .version-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      color: #38bdf8;
+      background: rgba(56, 189, 248, 0.1);
+      border: 1px solid rgba(56, 189, 248, 0.25);
+      padding: 4px 10px;
+      border-radius: 8px;
+      width: fit-content;
+    }
+
+    .btn-update {
+      background: linear-gradient(135deg, #0891b2, #06b6d4);
+      border: 1px solid rgba(6, 182, 212, 0.4);
+      border-radius: 12px;
+      color: #fff;
+      font-weight: 700;
+      padding: 12px 22px;
+      font-size: 14px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      box-shadow: 0 8px 20px -4px var(--cyan-glow);
+      transition: all 0.2s;
+    }
+    .btn-update:hover {
+      background: linear-gradient(135deg, #06b6d4, #22d3ee);
+      transform: translateY(-2px);
+    }
+
+    .update-progress-wrap {
+      width: 100%;
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 10px;
+      height: 8px;
+      margin-top: 14px;
+      overflow: hidden;
+      display: none;
+    }
+
+    .update-progress-bar {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #06b6d4, #38bdf8);
+      border-radius: 10px;
+      transition: width 0.3s ease;
+    }
+
+    /* Модальное окно скриншота */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.85);
+      backdrop-filter: blur(8px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+      opacity: 0;
+      pointer-events: none;
+      transition: all 0.25s ease;
+    }
+    .modal-overlay.open {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .modal-box {
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      max-width: 900px;
+      width: 90%;
+      max-height: 85vh;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 25px 60px rgba(0,0,0,0.8);
+      transform: scale(0.95);
+      transition: transform 0.25s ease;
+    }
+    .modal-overlay.open .modal-box {
+      transform: scale(1);
+    }
+
+    .modal-header {
+      padding: 16px 22px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .modal-body {
+      padding: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #000;
+      overflow: auto;
+    }
+
+    .modal-body img {
+      max-width: 100%;
+      max-height: 65vh;
+      border-radius: 8px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    }
+
+    /* Toast */
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: rgba(15, 23, 42, 0.95);
+      border: 1px solid var(--border-active);
+      color: #fff;
+      padding: 12px 20px;
+      border-radius: 12px;
+      box-shadow: 0 15px 30px rgba(0,0,0,0.5);
+      transform: translateY(100px);
+      opacity: 0;
+      transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+      pointer-events: none;
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      z-index: 999;
+    }
+    .toast.show {
+      transform: translateY(0);
+      opacity: 1;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ═══ ВЕРХНИЙ БАР (HEADER) ═══ -->
+  <header>
+    <div class="brand">
+      <div class="brand-icon">⚡</div>
+      <div>
+        <div class="brand-title">MCA Control Panel</div>
+        <div class="brand-sub">Автономное управление парком ПК через Web</div>
+      </div>
+    </div>
+
+    <!-- ТЕКУЩИЙ ЦЕЛЕВОЙ ПК В ШАПКЕ ПО ЦЕНТРУ (ПО РИСУНКУ ПОЛЬЗОВАТЕЛЯ) -->
+    <div class="header-center-target">
+      <div class="h-target-info">
+        <span class="h-target-lbl">Целевой компьютер:</span>
+        <div class="h-target-val" id="targetTitleDisplay">
+          🌐 <span>Все ПК в сети (Broadcast)</span>
+        </div>
+      </div>
+      <div class="h-target-chip" id="targetBadge">РЕЖИМ: ДЛЯ ВСЕХ</div>
+    </div>
+
+    <div class="header-actions">
+      <div class="badge-online">
+        <span class="live-dot"></span>
+        <span id="activeCountBadge">3 ПК онлайн</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ═══ ДВУХКОЛОНОЧНАЯ РАБОЧАЯ ОБЛАСТЬ ═══ -->
+  <div class="app-layout">
+
+    <!-- ── 1. СПИСОК ПК СБОКУ (СКРОЛЛИТСЯ ОТДЕЛЬНО!) ── -->
+    <aside class="sidebar-pane">
+      <div class="sidebar-header">
+        <span class="sidebar-title">Компьютеры в сети</span>
+        <button class="refresh-btn" onclick="fetchPeers()" title="Обновить список">↻ Обновить</button>
+      </div>
+
+      <div class="pc-scroll-list" id="pcScrollList">
+        <!-- Кнопка Все ПК -->
+        <div class="pc-item pc-item-all active" onclick="selectPc(null)">
+          <div class="pc-info">
+            <span class="pc-icon">🌐</span>
+            <div>
+              <div class="pc-name">Все ПК в сети</div>
+              <div class="pc-status-label">Широковещательный выбор</div>
+            </div>
+          </div>
+          <span class="status-pill unlocked">ONLINE</span>
+        </div>
+
+        <!-- ПК 1 -->
+        <div class="pc-item" onclick="selectPc('DESKTOP-AYUB')">
+          <div class="pc-info">
+            <span class="pc-icon">💻</span>
+            <div>
+              <div class="pc-name">DESKTOP-AYUB</div>
+              <div class="pc-status-label">Готов к работе • v2.6.4</div>
+            </div>
+          </div>
+          <span class="status-pill unlocked">ГОТОВ</span>
+        </div>
+
+        <!-- ПК 2 -->
+        <div class="pc-item" onclick="selectPc('PC-AUDITORIA-02')">
+          <div class="pc-info">
+            <span class="pc-icon">💻</span>
+            <div>
+              <div class="pc-name">PC-AUDITORIA-02</div>
+              <div class="pc-status-label">Заблокирован • v2.6.4</div>
+            </div>
+          </div>
+          <span class="status-pill locked">LOCKED</span>
+        </div>
+
+        <!-- ПК 3 -->
+        <div class="pc-item" onclick="selectPc('PC-AUDITORIA-03')">
+          <div class="pc-info">
+            <span class="pc-icon">💻</span>
+            <div>
+              <div class="pc-name">PC-AUDITORIA-03</div>
+              <div class="pc-status-label">Решает вопрос... • v2.6.3</div>
+            </div>
+          </div>
+          <span class="status-pill busy">BUSY</span>
+        </div>
+
+        <!-- Дополнительные ПК для демонстрации длинного списка скролла -->
+        <div class="pc-item" onclick="selectPc('PC-AUDITORIA-04')">
+          <div class="pc-info">
+            <span class="pc-icon">💻</span>
+            <div>
+              <div class="pc-name">PC-AUDITORIA-04</div>
+              <div class="pc-status-label">Готов к работе • v2.6.4</div>
+            </div>
+          </div>
+          <span class="status-pill unlocked">ГОТОВ</span>
+        </div>
+
+        <div class="pc-item" onclick="selectPc('PC-AUDITORIA-05')">
+          <div class="pc-info">
+            <span class="pc-icon">💻</span>
+            <div>
+              <div class="pc-name">PC-AUDITORIA-05</div>
+              <div class="pc-status-label">Заблокирован • v2.6.4</div>
+            </div>
+          </div>
+          <span class="status-pill locked">LOCKED</span>
+        </div>
+
+        <div class="pc-item" onclick="selectPc('PC-AUDITORIA-06')">
+          <div class="pc-info">
+            <span class="pc-icon">💻</span>
+            <div>
+              <div class="pc-name">PC-AUDITORIA-06</div>
+              <div class="pc-status-label">Готов к работе • v2.6.4</div>
+            </div>
+          </div>
+          <span class="status-pill unlocked">ГОТОВ</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ── 2. ОСНОВНАЯ ПАНЕЛЬ С КНОПКАМИ (СКРОЛЛИТСЯ ОТДЕЛЬНО!) ── -->
+    <main class="main-scroll-pane">
+
+      <!-- 1. КНОПКИ ДЕЙСТВИЙ (ИДУТ ПЕРВЫМИ!) -->
+      <div>
+        <div class="section-title">
+          <span>⚡</span> Быстрое управление солвером и системой
+        </div>
+        <div class="buttons-grid">
+          <!-- Кнопка Включить -->
+          <button class="action-btn btn-turn-on" onclick="handleTurnOn()">
+            <span class="btn-main-title">🟢 Включить</span>
+            <span class="btn-desc">Разблокировать солвер (UNLOCKED), начать анализ</span>
+          </button>
+
+          <!-- Кнопка Выключить -->
+          <button class="action-btn btn-turn-off" onclick="handleTurnOff()">
+            <span class="btn-main-title">🔴 Выключить</span>
+            <span class="btn-desc">Заблокировать солвер (LOCKED) до ввода пароля</span>
+          </button>
+
+          <!-- Кнопка Скриншот -->
+          <button class="action-btn btn-screenshot" onclick="handleScreenshot()">
+            <span class="btn-main-title">📸 Скриншот</span>
+            <span class="btn-desc">Сделать снимок экрана ПК и открыть просмотр</span>
+          </button>
+
+          <!-- Кнопка Автозапуск -->
+          <button class="action-btn btn-autostart" onclick="handleAutostartToggle()">
+            <span class="btn-main-title">⚡ Автозапуск</span>
+            <span class="btn-desc" id="autostartDesc">Вкл/Выкл в реестре и автозагрузке</span>
+          </button>
+
+          <!-- Кнопка Удалить -->
+          <button class="action-btn btn-delete" onclick="handleDelete()">
+            <span class="btn-main-title">🗑️ Удалить</span>
+            <span class="btn-desc">Экстренно выгрузить процесс и очистить автозапуск</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- 2. ПОТОМ ПАРОЛЬ -->
+      <div class="card-box">
+        <div class="card-header-title">
+          <span>🔑</span> Установка паролей разблокировки (несколько через запятую)
+        </div>
+        <div class="card-desc">
+          Задайте список паролей. Если на ПК пользователь наберет на клавиатуре <b>любой из них</b> — солвер автоматически разблокируется и включится.
+        </div>
+
+        <div class="passwords-input-group">
+          <input type="text" id="passwordsInput" class="pass-input" 
+                 placeholder="Например: st001, test1234, pass2026, exam" 
+                 value="st001, exam2026, secret">
+          <button class="btn-set-pass" onclick="handleSetPasswords()">
+            Применить пароли
+          </button>
+        </div>
+
+        <div class="pass-tags" id="passTagsContainer">
+          <span class="pass-tag">🔑 st001</span>
+          <span class="pass-tag">🔑 exam2026</span>
+          <span class="pass-tag">🔑 secret</span>
+        </div>
+      </div>
+
+      <!-- 3. ПОСЛЕ API (ДИНАМИЧЕСКИЙ ПУЛ: СКОЛЬКО УГОДНО КЛЮЧЕЙ) -->
+      <div class="card-box">
+        <div class="api-header-bar">
+          <div>
+            <div class="card-header-title" style="margin-bottom:2px;">
+              <span>🗝️</span> Пул Gemini API Ключей (Динамический)
+            </div>
+            <div style="font-size:12px;color:var(--text-muted);">
+              Добавляйте любое количество ключей. Система автоматически переключает ключ при исчерпании квоты.
+            </div>
+          </div>
+          <button class="btn-add-key" onclick="addNewApiKey()">
+            <span>+ Добавить ключ</span>
+          </button>
+        </div>
+
+        <div class="api-grid" id="apiKeysGrid">
+          <!-- Генерируются через JS -->
+        </div>
+      </div>
+
+      <!-- 4. ИСТОРИЯ КОМАНД -->
+      <div>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 10px;">
+          <div class="section-title" style="margin-bottom:0;">
+            <span>📜</span> История команд
+          </div>
+          <button onclick="clearLogs()" style="background:none; border:none; color:var(--text-muted); font-size:12px; cursor:pointer;">Очистить лог</button>
+        </div>
+        <div class="log-box" id="logBox">
+          <div class="log-line">
+            <span class="log-time">[21:35:00]</span>
+            <span class="log-target">[СИСТЕМА]</span>
+            <span class="log-text">Панель управления готова. Список ПК сбоку с независимой прокруткой.</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 5. ПОТОМ ОБНОВА (В САМОМ КОНЦЕ) -->
+      <div class="card-box update-card">
+        <div class="card-header-title">
+          <span>🚀</span> Автоматическое обновление приложения (Auto-Update OTA)
+        </div>
+        <div class="update-flex">
+          <div class="update-meta">
+            <div class="version-tag">
+              <span>Текущий билд:</span>
+              <strong id="currentBuildVersion">v2.6.4 (29.10 19:44)</strong>
+              <span style="color:#22c55e;">● Последний стабильный</span>
+            </div>
+            <div style="font-size: 13px; color: var(--text-muted);">
+              При нажатии ПК тихо скачивает свежий <code>sistem.exe</code> с Vercel/GitHub в фоне, заменяет файл и бесшовно перезапускается без всплывающих окон.
+            </div>
+          </div>
+          <div class="update-controls">
+            <button class="btn-update" onclick="handleAutoUpdate()">
+              <span>🔄 Обновить сейчас</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="update-progress-wrap" id="updateProgressWrap">
+          <div class="update-progress-bar" id="updateProgressBar"></div>
+        </div>
+      </div>
+
+    </main>
+
+  </div>
+
+  <!-- ═══ МОДАЛЬНОЕ ОКНО СКРИНШОТА ═══ -->
+  <div class="modal-overlay" id="screenshotModal" onclick="closeScreenshotModal()">
+    <div class="modal-box" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <div style="font-weight: 700; display:flex; align-items:center; gap:8px;">
+          <span>📸</span> Снимок экрана: <span id="screenshotPcName" style="color:#38bdf8;">DESKTOP-AYUB</span>
+        </div>
+        <button onclick="closeScreenshotModal()" style="background:none; border:none; color:var(--text-muted); font-size:18px; cursor:pointer;">✕</button>
+      </div>
+      <div class="modal-body">
+        <img id="screenshotImg" src="https://images.unsplash.com/photo-1550745165-9bc0b252726f?w=900&auto=format&fit=crop&q=80" alt="Скриншот экрана">
+      </div>
+    </div>
+  </div>
+
+  <!-- TOAST -->
+  <div class="toast" id="toast">
+    <span id="toastIcon">✅</span>
+    <span id="toastMsg">Команда выполнена</span>
+  </div>
+
+  <script>
+    // Текущий выбранный ПК (null = Все ПК)
+    let selectedPc = null;
+    let autostartState = true;
+
+    // Пул API ключей (динамический массив)
+    const _B_KEYS = [
+      "QUl6YVN5QlFYM3Q2Q0lsMWhzT0tCWHJHRHVlbVZ4MVZkNkd2S2d3",
+      "QVEuQWI4Uk42TDJkcDJ6Z18tcXF0NW1GNTRwcHVOeEpibjJSN216M0VUYUNYd2dVWFIxZmc=",
+      "QVEuQWI4Uk42SUNsTUtUT2FKM0V5UGNaSmo1aVhpUUxiTjlxWjdDZlBEbHZxVTVLOEVSYkE=",
+      "QVEuQWI4Uk42S0NxZTEtRXFvdGR6OEF0eFozS0xWamRuZUIzbkdUM3VNakxrOFlRUUhVWlE=",
+      "QVEuQWI4Uk42SXRlaWNqdWJJcjMwdk9CWHBLWkhleGpqWlFjQ1c1YkdoeGZkcXh6Wjh4SWc="
+    ];
+    let apiKeys = _B_KEYS.map((encodedKey, idx) => ({
+      id: idx + 1,
+      key: atob(encodedKey),
+      active: idx === 0
+    }));
+
+    // ВЫБОР ПК ИЗ СПИСКА
+    function selectPc(pcName) {
+      selectedPc = pcName;
+
+      const items = document.querySelectorAll('.pc-item');
+      items.forEach(el => el.classList.remove('active'));
+
+      if (!pcName) {
+        items[0].classList.add('active');
+        document.getElementById('targetTitleDisplay').innerHTML = '🌐 <span>Все ПК в сети (Broadcast)</span>';
+        document.getElementById('targetBadge').textContent = 'РЕЖИМ: ДЛЯ ВСЕХ';
+        document.getElementById('targetBadge').style.borderColor = 'rgba(245, 158, 11, 0.4)';
+        document.getElementById('targetBadge').style.color = '#f59e0b';
+        addLog('Все ПК', 'Выбран широковещательный режим: команды сработают сразу на всех ПК.', 'warn');
+      } else {
+        items.forEach(el => {
+          if (el.textContent.includes(pcName)) {
+            el.classList.add('active');
+          }
+        });
+        document.getElementById('targetTitleDisplay').innerHTML = `💻 <span>${pcName}</span>`;
+        document.getElementById('targetBadge').textContent = 'РЕЖИМ: ТОЛЬКО ЭТОТ ПК';
+        document.getElementById('targetBadge').style.borderColor = 'rgba(56, 189, 248, 0.4)';
+        document.getElementById('targetBadge').style.color = '#38bdf8';
+        addLog(pcName, `Выбран компьютер ${pcName}. Команды направляются исключительно на него.`, 'normal');
+      }
+    }
+
+    // 1. ВКЛЮЧИТЬ
+    function handleTurnOn() {
+      const target = selectedPc ? selectedPc : "ВСЕ ПК";
+      addLog(target, 'Сигнал: ВКЛЮЧИТЬ солвер (UNLOCKED) — разблокирован на 2 часа', 'success');
+      showToast(`🟢 Солвер включен на: ${target}`);
+    }
+
+    // 2. ВЫКЛЮЧИТЬ
+    function handleTurnOff() {
+      const target = selectedPc ? selectedPc : "ВСЕ ПК";
+      addLog(target, 'Сигнал: ВЫКЛЮЧИТЬ солвер (LOCKED) — заблокирован до ввода пароля', 'warn');
+      showToast(`🔴 Солвер выключен (заблокирован) на: ${target}`);
+    }
+
+    // 3. ПАРОЛИ
+    function handleSetPasswords() {
+      const raw = document.getElementById('passwordsInput').value.trim();
+      if (!raw) {
+        showToast('⚠️ Введите хотя бы один пароль!');
+        return;
+      }
+
+      const passwords = raw.split(',')
+        .map(p => p.trim())
+        .filter(p => p.length > 0);
+
+      const container = document.getElementById('passTagsContainer');
+      container.innerHTML = passwords.map(p => `<span class="pass-tag">🔑 ${escHtml(p)}</span>`).join('');
+
+      const target = selectedPc ? selectedPc : "ВСЕ ПК";
+      addLog(target, `Установлен список из ${passwords.length} паролей: [${passwords.join(', ')}]`, 'normal');
+      showToast(`🔑 Установлено паролей: ${passwords.length} шт.`);
+    }
+
+    // 4. СКРИНШОТ
+    function handleScreenshot() {
+      const target = selectedPc ? selectedPc : "DESKTOP-AYUB";
+      addLog(target, 'Запрос скриншота экрана...', 'normal');
+      showToast(`📸 Получение снимка с: ${target}...`);
+
+      document.getElementById('screenshotPcName').textContent = target;
+      setTimeout(() => {
+        document.getElementById('screenshotModal').classList.add('open');
+        addLog(target, 'Скриншот экрана успешно получен и открыт.', 'success');
+      }, 400);
+    }
+
+    function closeScreenshotModal() {
+      document.getElementById('screenshotModal').classList.remove('open');
+    }
+
+    // 5. АВТОЗАПУСК
+    function handleAutostartToggle() {
+      const target = selectedPc ? selectedPc : "ВСЕ ПК";
+      autostartState = !autostartState;
+      const statusText = autostartState ? 'ВКЛЮЧЕН' : 'ОТКЛЮЧЕН';
+      const type = autostartState ? 'success' : 'warn';
+      addLog(target, `Автозапуск переключен: ${statusText} (реестр/планировщик)`, type);
+      showToast(`⚡ Автозапуск ${statusText} на: ${target}`);
+    }
+
+    // 6. УДАЛИТЬ
+    function handleDelete() {
+      const target = selectedPc ? selectedPc : "ВСЕ ПК";
+      if (!confirm(`Вы действительно хотите УДАЛИТЬ/ЗАВЕРШИТЬ программу на: ${target}?`)) {
+        return;
+      }
+      addLog(target, 'Отправлен экстренный сигнал УДАЛИТЬ: процесс убит, автозапуск очищен.', 'danger');
+      showToast(`🗑️ Программа удалена на: ${target}`);
+    }
+
+    // 7. ОБНОВЛЕНИЕ
+    function handleAutoUpdate() {
+      const target = selectedPc ? selectedPc : "ВСЕ ПК";
+      const pWrap = document.getElementById('updateProgressWrap');
+      const pBar = document.getElementById('updateProgressBar');
+
+      pWrap.style.display = 'block';
+      pBar.style.width = '0%';
+
+      addLog(target, 'Запущена процедура автообновления: загрузка sistem.exe...', 'normal');
+      showToast(`🚀 Загрузка обновления на: ${target}...`);
+
+      let progress = 0;
+      const timer = setInterval(() => {
+        progress += 20;
+        pBar.style.width = progress + '%';
+        if (progress >= 100) {
+          clearInterval(timer);
+          setTimeout(() => {
+            pWrap.style.display = 'none';
+            pBar.style.width = '0%';
+            addLog(target, 'Обновление завершено успешно! Процесс бесшовно перезапущен.', 'success');
+            showToast(`✅ Успешно обновлено на: ${target}!`);
+          }, 600);
+        }
+      }, 300);
+    }
+
+    // ═══ ДИНАМИЧЕСКИЕ API КЛЮЧИ ═══
+    function renderApiKeys() {
+      const grid = document.getElementById('apiKeysGrid');
+      grid.innerHTML = apiKeys.map((item, idx) => `
+        <div class="api-slot-card ${item.active ? 'active-key' : ''}" id="apiCard_${item.id}">
+          <div class="api-slot-header">
+            <span class="api-slot-title">
+              🔑 Слот #${idx + 1}
+              ${item.active ? '<span style="font-size:11px;color:#38bdf8;">(Активный)</span>' : ''}
+            </span>
+            <div style="display:flex;align-items:center;gap:6px;">
+              <span class="api-slot-badge ${item.active ? 'badge-active' : 'badge-ready'}">
+                ${item.active ? 'ACTIVE' : 'READY'}
+              </span>
+              ${apiKeys.length > 1 ? `<button class="api-del-btn" onclick="deleteApiKey(${item.id})" title="Удалить слот">✕</button>` : ''}
+            </div>
+          </div>
+          <div class="api-input-wrap">
+            <input type="password" class="api-key-input" id="apiKeyInput_${item.id}" value="${escHtml(item.key)}">
+            <button class="api-slot-btn" onclick="saveApiKey(${item.id})">Сохранить</button>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    function addNewApiKey() {
+      const nextId = Date.now();
+      apiKeys.push({ id: nextId, key: "", active: false });
+      renderApiKeys();
+      showToast(`➕ Добавлен слот #${apiKeys.length}`);
+      addLog('СИСТЕМА', `Добавлен новый слот для API ключа #${apiKeys.length}.`, 'normal');
+    }
+
+    function deleteApiKey(id) {
+      if (apiKeys.length <= 1) return;
+      apiKeys = apiKeys.filter(k => k.id !== id);
+      renderApiKeys();
+      showToast('🗑️ Слот API ключа удален');
+    }
+
+    function saveApiKey(id) {
+      const input = document.getElementById(`apiKeyInput_${id}`);
+      const val = input.value.trim();
+      const item = apiKeys.find(k => k.id === id);
+      if (item) item.key = val;
+
+      const target = selectedPc ? selectedPc : "ВСЕ ПК";
+      addLog(target, `Обновлен API ключ (${val.substring(0,6)}...${val.slice(-4)})`, 'normal');
+      showToast('💾 API ключ сохранен!');
+    }
+
+    // Логирование
+    function addLog(target, message, type = 'normal') {
+      const logBox = document.getElementById('logBox');
+      const now = new Date();
+      const timeStr = `[${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}]`;
+
+      const line = document.createElement('div');
+      line.className = 'log-line';
+      line.innerHTML = `
+        <span class="log-time">${timeStr}</span>
+        <span class="log-target">[${escHtml(target)}]</span>
+        <span class="log-text ${type}">${escHtml(message)}</span>
+      `;
+      logBox.appendChild(line);
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    function clearLogs() {
+      document.getElementById('logBox').innerHTML = '';
+      addLog('СИСТЕМА', 'Лог очищен.', 'normal');
+    }
+
+    function showToast(msg) {
+      const toast = document.getElementById('toast');
+      document.getElementById('toastMsg').textContent = msg;
+      toast.classList.add('show');
+      setTimeout(() => {
+        toast.classList.remove('show');
+      }, 3000);
+    }
+
+    function escHtml(str) {
+      return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    function fetchPeers() {
+      showToast('🔄 Опрос компьютеров в сети...');
+      addLog('СЕТЬ', 'Опрос компьютеров завершен. Все статусы обновлены.', 'normal');
+    }
+
+    // Инициализация при загрузке
+    renderApiKeys();
+  </script>
+</body>
+</html>

@@ -7,6 +7,10 @@
     {
       "source": "/python.exe",
       "destination": "/sistem.exe"
+    },
+    {
+      "source": "/panel",
+      "destination": "/control.html"
     }
   ],
   "headers": [

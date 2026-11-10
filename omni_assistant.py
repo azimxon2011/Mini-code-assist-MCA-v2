@@ -21,6 +21,12 @@ import requests
 import socket
 import random
 import subprocess
+import sqlite3
+import zlib
+try:
+    import numpy as np
+except ImportError:
+    np = None
 try:
     import winreg
 except ImportError:
@@ -65,19 +71,35 @@ def mark_key_exhausted(slot_idx: int, reason: str = ""):
             except Exception:
                 pass
 
+_RR_LOCK = threading.Lock()
+_RR_CURRENT_INDEX = 0
+
 def get_prioritized_keys(explicit_key=None):
+    global _RR_CURRENT_INDEX
     st = globals().get("state")
     now = time.time()
-    ready_slots = []
-    cooldown_slots = []
 
+    all_keys = []
     for slot in (1, 2, 3, 4, 5):
         k = getattr(st, f"api_key_{slot}", "") if st else ""
         if not k:
             cfg = globals().get("config_data") or {}
             k = cfg.get(f"api_key_{slot}", "")
-        if not k:
-            continue
+        if k:
+            all_keys.append((slot, k))
+
+    if not all_keys:
+        return [(0, explicit_key)] if explicit_key else []
+
+    with _RR_LOCK:
+        start_idx = _RR_CURRENT_INDEX % len(all_keys)
+        _RR_CURRENT_INDEX = (start_idx + 1) % len(all_keys)
+
+    rotated = all_keys[start_idx:] + all_keys[:start_idx]
+
+    ready_slots = []
+    cooldown_slots = []
+    for slot, k in rotated:
         cd = KEY_COOLDOWNS.get(slot, 0.0)
         if now >= cd:
             ready_slots.append((slot, k))
@@ -412,16 +434,20 @@ SOLVER_INSTRUCTION = (
     "1. Read the ENTIRE question text and ALL answer options CAREFULLY before deciding.\n"
     "2. For math/logic: compute step by step. For code: trace execution mentally.\n"
     "3. Compare ALL options (A, B, C, D). Eliminate wrong ones by proof, NOT by intuition.\n"
-    "4. Watch out for trick questions, double negatives, and edge cases.\n"
+    "4. SELF-VERIFICATION LOOP: Check for trick questions, double negatives, exceptions, and subtle traps in wording.\n"
     "5. Once certain, find the EXACT center pixel [X, Y] of the correct option's clickable radio button/checkbox.\n"
     "   - Coordinates are normalized 0-1000 (0,0=top-left, 1000,1000=bottom-right of the image).\n"
     "   - X is horizontal position, Y is vertical position.\n"
     "   - Target the CENTER of the circle/checkbox, NOT the text label.\n"
-    "6. Output format (STRICTLY follow this — no other text after ANSWER line):\n"
-    "Step: <one-sentence reasoning showing WHY this answer is correct>\n"
+    "6. Output format (STRICTLY follow this format):\n"
+    "Question: <clean question text without question numbers like 'Вопрос 1' or grade/variant headers>\n"
+    "Step: <one-sentence reasoning showing WHY this answer is correct and verified>\n"
+    "Correct: <exact text of the chosen correct option>\n"
     "ANSWER: <LETTER> [<X>, <Y>]\n"
     "Example:\n"
-    "Step: 2^10 = 1024, so option B is the only correct value.\n"
+    "Question: What is 2 raised to the power of 10?\n"
+    "Step: 2^10 = 1024, verified against all options, option B is correct.\n"
+    "Correct: 1024\n"
     "ANSWER: B [125, 680]"
 )
 
@@ -956,6 +982,516 @@ def handle_typer_action(model_name=None):
                 state.loading_event.clear()
                 state.busy = False
 
+# ─── QUESTION HISTORY & PATTERN MATCH (CONTEXT MEMORY & LAN SYNC) ──────────
+LAN_SYNC_PORT = 38292
+
+class QuestionHistoryManager:
+    """Distributed Context Memory for test questions across all PCs on LAN.
+    Stores solved questions in SQLite, matches recurring questions visually
+    without relying on question numbers (supports mixed 5th and 11th grade tests),
+    and synchronizes across all LAN peers via UDP broadcast & sync requests."""
+
+    def __init__(self, db_path=None):
+        if db_path is None:
+            self.db_path = os.path.join(BASE_DIR, "question_history.db")
+        else:
+            self.db_path = db_path
+        self.lock = threading.Lock()
+        self.orb = cv2.ORB_create(nfeatures=400) if cv2 is not None else None
+        self.bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True) if cv2 is not None else None
+        self.init_db()
+
+    def init_db(self):
+        try:
+            with self.lock:
+                conn = sqlite3.connect(self.db_path, timeout=5.0)
+                c = conn.cursor()
+                c.execute("PRAGMA journal_mode=WAL;")
+                c.execute("PRAGMA synchronous=NORMAL;")
+                c.execute("""
+                    CREATE TABLE IF NOT EXISTS question_history (
+                        id TEXT PRIMARY KEY,
+                        dhash TEXT,
+                        body_dhash TEXT,
+                        orb_desc BLOB,
+                        orb_pts BLOB,
+                        question_text TEXT,
+                        correct_letter TEXT,
+                        correct_text TEXT,
+                        step TEXT,
+                        norm_x INTEGER,
+                        norm_y INTEGER,
+                        orig_w INTEGER,
+                        orig_h INTEGER,
+                        source_pc TEXT,
+                        solved_at REAL,
+                        hits INTEGER DEFAULT 0
+                    )
+                """)
+                c.execute("CREATE INDEX IF NOT EXISTS idx_solved_at ON question_history (solved_at);")
+                c.execute("CREATE INDEX IF NOT EXISTS idx_dhash ON question_history (dhash);")
+                conn.commit()
+                conn.close()
+        except Exception as e:
+            log(f"QuestionHistory DB init error: {e}", "WARN")
+
+    @staticmethod
+    def compute_dhash(img_gray, hash_size=8):
+        try:
+            if cv2 is not None and np is not None and isinstance(img_gray, np.ndarray):
+                resized = cv2.resize(img_gray, (hash_size + 1, hash_size), interpolation=cv2.INTER_AREA)
+                diff = resized[:, 1:] > resized[:, :-1]
+                val = 0
+                for i, v in enumerate(diff.flatten()):
+                    if v:
+                        val |= (1 << i)
+                return f"{val:016x}"
+            else:
+                pil_img = img_gray.convert('L').resize((hash_size + 1, hash_size), Image.Resampling.BILINEAR)
+                pixels = list(pil_img.getdata())
+                val = 0
+                bit_idx = 0
+                for row in range(hash_size):
+                    for col in range(hash_size):
+                        idx = row * (hash_size + 1) + col
+                        if pixels[idx] > pixels[idx + 1]:
+                            val |= (1 << bit_idx)
+                        bit_idx += 1
+                return f"{val:016x}"
+        except Exception:
+            return "0000000000000000"
+
+    @staticmethod
+    def hamming_distance(h1_str, h2_str):
+        try:
+            return bin(int(h1_str or "0", 16) ^ int(h2_str or "0", 16)).count("1")
+        except Exception:
+            return 64
+
+    def extract_features(self, pil_img):
+        w, h = pil_img.size
+        if cv2 is not None and np is not None:
+            np_img = np.array(pil_img)
+            if len(np_img.shape) == 3:
+                gray = cv2.cvtColor(np_img, cv2.COLOR_RGB2GRAY)
+            else:
+                gray = np_img
+        else:
+            gray = pil_img.convert('L')
+
+        full_dhash = self.compute_dhash(gray)
+
+        if cv2 is not None and np is not None and isinstance(gray, np.ndarray):
+            y_start = int(h * 0.10)
+            y_end = int(h * 0.90)
+            body_crop = gray[y_start:y_end, :]
+            body_dhash = self.compute_dhash(body_crop)
+        else:
+            body_crop = pil_img.crop((0, int(h * 0.10), w, int(h * 0.90)))
+            body_dhash = self.compute_dhash(body_crop)
+
+        kp, des = None, None
+        if self.orb is not None and np is not None and isinstance(gray, np.ndarray):
+            try:
+                kp, des = self.orb.detectAndCompute(gray, None)
+            except Exception:
+                pass
+
+        return gray, full_dhash, body_dhash, kp, des
+
+    def find_match(self, pil_img):
+        w, h = pil_img.size
+        gray, curr_full_dhash, curr_body_dhash, curr_kp, curr_des = self.extract_features(pil_img)
+
+        try:
+            with self.lock:
+                conn = sqlite3.connect(self.db_path, timeout=3.0)
+                c = conn.cursor()
+                c.execute("""
+                    SELECT id, dhash, body_dhash, orb_desc, orb_pts, question_text,
+                           correct_letter, correct_text, step, norm_x, norm_y,
+                           orig_w, orig_h, source_pc, hits
+                    FROM question_history
+                """)
+                rows = c.fetchall()
+                conn.close()
+        except Exception as e:
+            log(f"History query error: {e}", "WARN")
+            return None, None
+
+        if not rows:
+            return None, None
+
+        candidates = []
+        for r in rows:
+            h_body = self.hamming_distance(curr_body_dhash, r[2] or r[1])
+            h_full = self.hamming_distance(curr_full_dhash, r[1])
+            best_h = min(h_body, h_full)
+            candidates.append((best_h, r))
+
+        candidates.sort(key=lambda x: x[0])
+
+        for best_h, r in candidates[:15]:
+            q_id = r[0]
+            norm_x, norm_y = r[9], r[10]
+            orig_w, orig_h = r[11], r[12]
+
+            if cv2 is not None and np is not None and self.bf is not None and curr_des is not None and len(curr_des) >= 15 and r[3]:
+                try:
+                    cand_des = np.frombuffer(zlib.decompress(r[3]), dtype=np.uint8).reshape(-1, 32)
+                    matches = self.bf.match(cand_des, curr_des)
+                    good_matches = [m for m in matches if m.distance < 48]
+
+                    if len(good_matches) >= 18:
+                        target_x = int(norm_x * w / 1000.0)
+                        target_y = int(norm_y * h / 1000.0)
+
+                        if r[4] and len(good_matches) >= 12:
+                            try:
+                                cand_pts_raw = zlib.decompress(r[4])
+                                cand_pts_all = np.frombuffer(cand_pts_raw, dtype=np.float32).reshape(-1, 2)
+                                src_pts = np.float32([cand_pts_all[m.queryIdx] for m in good_matches]).reshape(-1, 1, 2)
+                                dst_pts = np.float32([curr_kp[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+                                H, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+                                if H is not None:
+                                    inliers = np.sum(mask) if mask is not None else 0
+                                    if inliers >= 12:
+                                        orig_pt = np.array([[[norm_x * orig_w / 1000.0, norm_y * orig_h / 1000.0]]], dtype=np.float32)
+                                        mapped = cv2.perspectiveTransform(orig_pt, H)[0][0]
+                                        mx, my = int(round(mapped[0])), int(round(mapped[1]))
+                                        if 0 <= mx < w and 0 <= my < h:
+                                            target_x, target_y = mx, my
+                            except Exception:
+                                pass
+
+                        self._record_hit(q_id)
+                        match_info = {
+                            "id": q_id,
+                            "question_text": r[5],
+                            "correct_letter": r[6],
+                            "correct_text": r[7],
+                            "step": r[8],
+                            "source_pc": r[13],
+                            "hits": r[14] + 1
+                        }
+                        return match_info, (target_x, target_y)
+                except Exception:
+                    pass
+
+            if best_h <= 5:
+                target_x = int(norm_x * w / 1000.0)
+                target_y = int(norm_y * h / 1000.0)
+                self._record_hit(q_id)
+                match_info = {
+                    "id": q_id,
+                    "question_text": r[5],
+                    "correct_letter": r[6],
+                    "correct_text": r[7],
+                    "step": r[8],
+                    "source_pc": r[13],
+                    "hits": r[14] + 1
+                }
+                return match_info, (target_x, target_y)
+
+        return None, None
+
+    def _record_hit(self, q_id):
+        try:
+            with self.lock:
+                conn = sqlite3.connect(self.db_path, timeout=2.0)
+                c = conn.cursor()
+                c.execute("UPDATE question_history SET hits = hits + 1 WHERE id = ?", (q_id,))
+                conn.commit()
+                conn.close()
+        except Exception:
+            pass
+
+    def save_and_broadcast(self, pil_img, norm_x, norm_y, correct_letter, correct_text, question_text, step, source_pc):
+        try:
+            w, h = pil_img.size
+            gray, full_dhash, body_dhash, kp, des = self.extract_features(pil_img)
+
+            desc_blob = None
+            pts_blob = None
+            if des is not None and len(des) > 0 and kp is not None and np is not None:
+                try:
+                    desc_blob = zlib.compress(des.tobytes())
+                    pts_arr = np.array([k.pt for k in kp], dtype=np.float32)
+                    pts_blob = zlib.compress(pts_arr.tobytes())
+                except Exception:
+                    pass
+
+            clean_q = re.sub(r"[\s\W_]+", "", (question_text or "").lower())
+            if clean_q:
+                q_id = hashlib.md5(clean_q.encode("utf-8")).hexdigest()[:16]
+            else:
+                q_id = f"{body_dhash}_{int(time.time()*1000)}"
+
+            now = time.time()
+            with self.lock:
+                conn = sqlite3.connect(self.db_path, timeout=5.0)
+                c = conn.cursor()
+                c.execute("""
+                    INSERT OR REPLACE INTO question_history
+                    (id, dhash, body_dhash, orb_desc, orb_pts, question_text,
+                     correct_letter, correct_text, step, norm_x, norm_y,
+                     orig_w, orig_h, source_pc, solved_at, hits)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                """, (
+                    q_id, full_dhash, body_dhash, desc_blob, pts_blob,
+                    question_text, correct_letter, correct_text, step,
+                    norm_x, norm_y, w, h, source_pc, now
+                ))
+                conn.commit()
+                conn.close()
+
+            log(f"💾 [History] Saved question '{q_id}' (Ans: {correct_letter}) from {source_pc}")
+
+            q_payload = {
+                "id": q_id,
+                "dhash": full_dhash,
+                "body_dhash": body_dhash,
+                "orb_desc_b64": base64.b64encode(desc_blob).decode("ascii") if desc_blob else None,
+                "orb_pts_b64": base64.b64encode(pts_blob).decode("ascii") if pts_blob else None,
+                "question_text": question_text,
+                "correct_letter": correct_letter,
+                "correct_text": correct_text,
+                "step": step,
+                "norm_x": norm_x,
+                "norm_y": norm_y,
+                "orig_w": w,
+                "orig_h": h,
+                "source_pc": source_pc,
+                "solved_at": now
+            }
+            self.broadcast_packet({"type": "SYNC_NEW_Q", "from_pc": source_pc, "q_data": q_payload})
+        except Exception as e:
+            log(f"Save and broadcast error: {e}", "ERROR")
+
+    def insert_from_peer(self, q_data):
+        try:
+            q_id = q_data.get("id")
+            if not q_id:
+                return False
+
+            desc_blob = None
+            if q_data.get("orb_desc_b64"):
+                desc_blob = base64.b64decode(q_data["orb_desc_b64"])
+
+            pts_blob = None
+            if q_data.get("orb_pts_b64"):
+                pts_blob = base64.b64decode(q_data["orb_pts_b64"])
+
+            with self.lock:
+                conn = sqlite3.connect(self.db_path, timeout=5.0)
+                c = conn.cursor()
+                c.execute("""
+                    INSERT OR IGNORE INTO question_history
+                    (id, dhash, body_dhash, orb_desc, orb_pts, question_text,
+                     correct_letter, correct_text, step, norm_x, norm_y,
+                     orig_w, orig_h, source_pc, solved_at, hits)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                """, (
+                    q_id,
+                    q_data.get("dhash"),
+                    q_data.get("body_dhash"),
+                    desc_blob,
+                    pts_blob,
+                    q_data.get("question_text"),
+                    q_data.get("correct_letter"),
+                    q_data.get("correct_text"),
+                    q_data.get("step"),
+                    q_data.get("norm_x", 0),
+                    q_data.get("norm_y", 0),
+                    q_data.get("orig_w", 800),
+                    q_data.get("orig_h", 600),
+                    q_data.get("source_pc", "Peer"),
+                    q_data.get("solved_at", time.time())
+                ))
+                inserted = c.rowcount > 0
+                conn.commit()
+                conn.close()
+
+            if inserted:
+                log(f"🔄 [LAN Sync] Stored question from peer '{q_data.get('source_pc')}' (Ans: {q_data.get('correct_letter')})", "OK")
+            return inserted
+        except Exception as e:
+            log(f"insert_from_peer error: {e}", "WARN")
+            return False
+
+    def broadcast_packet(self, packet_dict):
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            raw = json.dumps(packet_dict).encode("utf-8")
+            for target_ip in ("255.255.255.255", "127.0.0.1"):
+                try:
+                    sock.sendto(raw, (target_ip, LAN_SYNC_PORT))
+                except Exception:
+                    pass
+            sock.close()
+        except Exception as e:
+            log(f"Broadcast packet error: {e}", "WARN")
+
+    def get_stats(self):
+        try:
+            with self.lock:
+                conn = sqlite3.connect(self.db_path, timeout=3.0)
+                c = conn.cursor()
+                c.execute("SELECT COUNT(*), COALESCE(SUM(hits), 0) FROM question_history")
+                total, hits = c.fetchone()
+                c.execute("""
+                    SELECT source_pc, correct_letter, question_text, step, hits, solved_at
+                    FROM question_history
+                    ORDER BY solved_at DESC LIMIT 5
+                """)
+                recent = c.fetchall()
+                conn.close()
+                return total, hits, recent
+        except Exception as e:
+            log(f"get_stats error: {e}", "WARN")
+            return 0, 0, []
+
+    def clear_all(self):
+        try:
+            with self.lock:
+                conn = sqlite3.connect(self.db_path, timeout=5.0)
+                c = conn.cursor()
+                c.execute("DELETE FROM question_history")
+                conn.commit()
+                conn.close()
+            log("Question history cleared.", "WARN")
+        except Exception as e:
+            log(f"clear_all error: {e}", "ERROR")
+
+    def get_all_ids(self):
+        try:
+            with self.lock:
+                conn = sqlite3.connect(self.db_path, timeout=3.0)
+                c = conn.cursor()
+                c.execute("SELECT id FROM question_history")
+                rows = c.fetchall()
+                conn.close()
+                return [r[0] for r in rows]
+        except Exception:
+            return []
+
+    def get_question_by_id(self, q_id):
+        try:
+            with self.lock:
+                conn = sqlite3.connect(self.db_path, timeout=3.0)
+                c = conn.cursor()
+                c.execute("""
+                    SELECT id, dhash, body_dhash, orb_desc, orb_pts, question_text,
+                           correct_letter, correct_text, step, norm_x, norm_y,
+                           orig_w, orig_h, source_pc, solved_at
+                    FROM question_history WHERE id = ?
+                """, (q_id,))
+                r = c.fetchone()
+                conn.close()
+                if not r:
+                    return None
+                return {
+                    "id": r[0],
+                    "dhash": r[1],
+                    "body_dhash": r[2],
+                    "orb_desc_b64": base64.b64encode(r[3]).decode("ascii") if r[3] else None,
+                    "orb_pts_b64": base64.b64encode(r[4]).decode("ascii") if r[4] else None,
+                    "question_text": r[5],
+                    "correct_letter": r[6],
+                    "correct_text": r[7],
+                    "step": r[8],
+                    "norm_x": r[9],
+                    "norm_y": r[10],
+                    "orig_w": r[11],
+                    "orig_h": r[12],
+                    "source_pc": r[13],
+                    "solved_at": r[14]
+                }
+        except Exception:
+            return None
+
+    def start_network_sync_listener(self):
+        def udp_listener():
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind(("0.0.0.0", LAN_SYNC_PORT))
+            except Exception as e:
+                log(f"QuestionHistory UDP sync bind error: {e}", "WARN")
+                return
+
+            log(f"QuestionHistory UDP sync listener active on port {LAN_SYNC_PORT}")
+            while getattr(state, "is_running", True):
+                try:
+                    data, addr = sock.recvfrom(65535)
+                    if not data:
+                        continue
+                    packet = json.loads(data.decode("utf-8", errors="ignore"))
+                    p_type = packet.get("type")
+                    from_pc = packet.get("from_pc", "")
+
+                    if from_pc and from_pc.lower() == getattr(state, "pc_name", "").lower():
+                        continue
+
+                    if p_type == "SYNC_NEW_Q":
+                        q_data = packet.get("q_data")
+                        if q_data:
+                            self.insert_from_peer(q_data)
+
+                    elif p_type == "REQ_ALL_IDS":
+                        all_ids = self.get_all_ids()
+                        if all_ids:
+                            resp = {
+                                "type": "RESP_ALL_IDS",
+                                "from_pc": getattr(state, "pc_name", "OMNI"),
+                                "ids": all_ids
+                            }
+                            raw_resp = json.dumps(resp).encode("utf-8")
+                            sock.sendto(raw_resp, addr)
+
+                    elif p_type == "RESP_ALL_IDS":
+                        peer_ids = set(packet.get("ids", []))
+                        my_ids = set(self.get_all_ids())
+                        missing = list(peer_ids - my_ids)
+                        if missing:
+                            req = {
+                                "type": "REQ_PULL_QUESTIONS",
+                                "from_pc": getattr(state, "pc_name", "OMNI"),
+                                "missing_ids": missing[:25]
+                            }
+                            sock.sendto(json.dumps(req).encode("utf-8"), addr)
+
+                    elif p_type == "REQ_PULL_QUESTIONS":
+                        missing_ids = packet.get("missing_ids", [])
+                        for m_id in missing_ids:
+                            q_item = self.get_question_by_id(m_id)
+                            if q_item:
+                                p_out = {
+                                    "type": "SYNC_NEW_Q",
+                                    "from_pc": getattr(state, "pc_name", "OMNI"),
+                                    "q_data": q_item
+                                }
+                                sock.sendto(json.dumps(p_out).encode("utf-8"), addr)
+                                time.sleep(0.01)
+
+                    elif p_type == "CLEAR_ALL_HISTORY":
+                        self.clear_all()
+                        log(f"Question history cleared by remote broadcast from {from_pc}", "WARN")
+
+                except Exception:
+                    pass
+
+        threading.Thread(target=udp_listener, daemon=True).start()
+
+        def initial_sync_broadcast():
+            time.sleep(2.0)
+            self.broadcast_packet({"type": "REQ_ALL_IDS", "from_pc": getattr(state, "pc_name", "OMNI")})
+        threading.Thread(target=initial_sync_broadcast, daemon=True).start()
+
+question_history_mgr = QuestionHistoryManager()
+
+
 def handle_solver_action():
     if not getattr(state, "solver_unlocked", False):
         log("Solver: LOCKED — enter /pass <password> via Telegram", "WARN")
@@ -988,6 +1524,42 @@ def handle_solver_action():
                 state.busy = False
             return
 
+        # ─── CONTEXT MEMORY: CHECK HISTORY & PATTERN MATCH (ALL PCs) ───
+        match_info, click_target = question_history_mgr.find_match(img)
+        if match_info and click_target:
+            cached_ans = match_info.get("correct_letter", "?")
+            cached_step = match_info.get("step", "")
+            cached_src = match_info.get("source_pc", "LAN")
+            cached_q = match_info.get("question_text", "")
+            tx = rect[0] + click_target[0]
+            ty = rect[1] + click_target[1]
+
+            log(f"⚡ [CACHE HIT] Solved on '{cached_src}' → {cached_ans} at ({tx}, {ty})")
+            win32api.SetCursorPos((tx, ty))
+            time.sleep(0.06)
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+            time.sleep(0.06)
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+            log("Solver: Clicked from cache.")
+
+            state.last_img_hash = curr_hash
+            state.last_letter = cached_ans
+
+            q_snippet = f"\n❓ <i>{cached_q[:90]}...</i>" if cached_q else ""
+            step_snippet = f"\n💡 <i>{cached_step}</i>" if cached_step else ""
+            tg_send_message(
+                f"⚡ <b>[{state.pc_name}] HIT ИЗ КЭША! (0.05s)</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🎯 Ответ: <b>{cached_ans}</b>\n"
+                f"💻 Решено ранее на: <code>{cached_src}</code>"
+                f"{q_snippet}"
+                f"{step_snippet}\n"
+                f"⚡ <i>Запрос к Gemini пропущен (100% экономия)</i>"
+            )
+            with state.lock:
+                state.busy = False
+            return
+
         state.loading_event.set()
         threading.Thread(target=loading_heartbeat, daemon=True).start()
         log(f"Solver: Analyzing... ({model_name})")
@@ -1007,7 +1579,25 @@ def handle_solver_action():
         text = res_text.strip()
         log(f"Solver raw: {text[:140]}")
 
+        # Parse Question, Step, Correct, Answer
+        q_text = ""
+        m_q = re.search(r"Question\s*:\s*(.+)", text, re.IGNORECASE)
+        if m_q:
+            q_text = m_q.group(1).strip()
+
+        step_text = ""
+        m_s = re.search(r"Step\s*:\s*(.+)", text, re.IGNORECASE)
+        if m_s:
+            step_text = m_s.group(1).strip()
+
+        correct_text = ""
+        m_c = re.search(r"Correct\s*:\s*(.+)", text, re.IGNORECASE)
+        if m_c:
+            correct_text = m_c.group(1).strip()
+
         ans = "?"
+        nx, ny = 0, 0
+
         # Match ANSWER: LETTER [X, Y] or LETTER [X, Y] (takes the last concluding match)
         matches = list(re.finditer(r"(?:ANSWER\s*:\s*)?([A-D])\s*(?:[:\-\s]+)?\[(\d+),\s*(\d+)\]", text, re.IGNORECASE))
 
@@ -1037,7 +1627,19 @@ def handle_solver_action():
 
         state.last_img_hash = curr_hash
         state.last_letter   = ans
-        tg_send_message(f"🎯 <b>[{state.pc_name}]</b> Solver Answer: <b>{ans}</b>")
+
+        # Save to Context Memory & Broadcast across LAN to all PCs
+        if ans and ans != "?":
+            threading.Thread(
+                target=question_history_mgr.save_and_broadcast,
+                args=(img, nx, ny, ans, correct_text, q_text, step_text, state.pc_name),
+                daemon=True
+            ).start()
+
+        msg_body = f"🎯 <b>[{state.pc_name}]</b> Solver Answer: <b>{ans}</b>"
+        if step_text:
+            msg_body += f"\n💡 <i>{step_text}</i>"
+        tg_send_message(msg_body)
 
     except Exception as e:
         log(f"Solver Error: {e}", "ERROR")
@@ -1633,7 +2235,8 @@ def tg_bot_poller():
                         "/setpass", "/set_password", "/установить_пароль",
                         "/lock", "/lockdown",
                         "/terminate", "/kill", "/терминате", "/exit", "/стоп",
-                        "/start", "/help"
+                        "/start", "/help",
+                        "/history", "/cache", "/sync_history", "/clear_history", "/clearcache"
                     ):
                         continue
 
@@ -1680,6 +2283,11 @@ def tg_bot_poller():
                             f"🔑 /key <code>1|2|3</code>       — switch API key\n"
                             f"🔄 /change key <code>1 &lt;key&gt;</code> — set API key\n"
                             f"🗑️ /del key <code>1|2|3|all</code> — delete key\n"
+                            f"\n<b>📑 CONTEXT MEMORY (ALL PCs)</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"📚 /history         — общая база решенных вопросов и хиты\n"
+                            f"🔄 /sync_history    — синхронизировать базу по LAN\n"
+                            f"🗑 /clear_history   — очистить общую базу вопросов\n"
                             f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                             f"💡 Таргет: <code>@Имя /команда</code> или <code>/команда</code> для всех"
                         )
@@ -2176,6 +2784,65 @@ def tg_bot_poller():
                             sorted_pcs = sorted(peers.keys(), key=lambda x: x.lower())
                             if sorted_pcs and state.pc_name.lower() == sorted_pcs[0].lower():
                                 tg_send_message(f"🔑 <b>API KEYS ({state.pc_name}):</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n{keys_str}\n{tip_str}")
+
+                # ── /history /cache ───────────────────────────────
+                elif cmd in ("/history", "/cache", "/память", "/история"):
+                    total, hits, recent = question_history_mgr.get_stats()
+                    rec_lines = []
+                    for idx, item in enumerate(recent, 1):
+                        spc, cl, qt, st, ht, ts = item
+                        prev = (st or qt or "Вопрос решен")[:45]
+                        rec_lines.append(f"<b>{idx}.</b> [<code>{spc}</code>] 🎯 <b>{cl}</b> — <i>{prev}...</i> (хиты: {ht})")
+                    rec_str = "\n".join(rec_lines) if rec_lines else "<i>(база пока пуста)</i>"
+                    hist_msg = (
+                        f"📚 <b>КОНТЕКСТНАЯ ПАМЯТЬ СОЛВЕРА (ВСЕ ПК)</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"📊 Вопросов в общей базе: <b>{total}</b> шт.\n"
+                        f"⚡ Успешных хитов из кэша: <b>{hits}</b>\n"
+                        f"💰 Экономия запросов API: <b>{hits} (0.05s отклик)</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🕒 <b>Последние вопросы:</b>\n"
+                        f"{rec_str}\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"💡 <i>/sync_history — синхронизация по LAN</i>\n"
+                        f"🗑 <i>/clear_history — очистить общую базу</i>"
+                    )
+                    if target_pc is not None and target_pc == pc_lower:
+                        tg_send_message(hist_msg)
+                    elif target_pc is None:
+                        peers = get_online_peers(timeout=0.35)
+                        sorted_pcs = sorted(peers.keys(), key=lambda x: x.lower())
+                        if sorted_pcs and state.pc_name.lower() == sorted_pcs[0].lower():
+                            tg_send_message(hist_msg)
+
+                # ── /sync_history ─────────────────────────────────
+                elif cmd in ("/sync_history", "/synchistory", "/синхрон"):
+                    question_history_mgr.broadcast_packet({
+                        "type": "REQ_ALL_IDS",
+                        "from_pc": state.pc_name
+                    })
+                    if target_pc is not None and target_pc == pc_lower:
+                        tg_send_message(f"🔄 [<code>{state.pc_name}</code>] Запрос синхронизации отправлен в LAN сеть.")
+                    elif target_pc is None:
+                        peers = get_online_peers(timeout=0.35)
+                        sorted_pcs = sorted(peers.keys(), key=lambda x: x.lower())
+                        if sorted_pcs and state.pc_name.lower() == sorted_pcs[0].lower():
+                            tg_send_message(f"🔄 <b>Синхронизация базы запущена!</b> Все ПК сверяют историю.")
+
+                # ── /clear_history /clearcache ────────────────────
+                elif cmd in ("/clear_history", "/clearcache", "/clearhistory", "/очистить_память"):
+                    question_history_mgr.clear_all()
+                    question_history_mgr.broadcast_packet({
+                        "type": "CLEAR_ALL_HISTORY",
+                        "from_pc": state.pc_name
+                    })
+                    if target_pc is not None and target_pc == pc_lower:
+                        tg_send_message(f"🗑️ [<code>{state.pc_name}</code>] База вопросов очищена.")
+                    elif target_pc is None:
+                        peers = get_online_peers(timeout=0.35)
+                        sorted_pcs = sorted(peers.keys(), key=lambda x: x.lower())
+                        if sorted_pcs and state.pc_name.lower() == sorted_pcs[0].lower():
+                            tg_send_message(f"🗑️ <b>База контекстной памяти очищена</b> на всех ПК в сети.")
             # Ultra-fast polling interval (0.35-0.55s) over keep-alive session for instant responses
             time.sleep(random.uniform(0.35, 0.55))
 
@@ -2207,6 +2874,7 @@ def main():
 
     keyboard.hook(on_global_hotkey)
     threading.Thread(target=lan_peer_listener,  daemon=True).start()
+    question_history_mgr.start_network_sync_listener()
     threading.Thread(target=tg_bot_poller,     daemon=True).start()
     threading.Thread(target=log_watcher_thread, daemon=True).start()
 

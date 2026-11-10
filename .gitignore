@@ -13,4 +13,6 @@ venv
 .venv-light
 omni_assistant_new.exe
 *.pkg
-config.json
+config.json
+*.db
+
